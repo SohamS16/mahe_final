@@ -1,0 +1,297 @@
+================================================================================
+FULL PIPELINE NARRATIVE: LIDAR PERCEPTION → NAV CONTROLLER (LIDAR-ONLY MODE)
+================================================================================
+Document reflects current code state as of 2026-04-16.
+Camera-based overrides (ArUco, Sign) are DISABLED. Pure LiDAR cognition only.
+================================================================================
+
+
+PART 1: THE RAW SENSOR — WHAT THE LIDAR ACTUALLY PRODUCES
+-----------------------------------------------------------
+The robot's 360-degree 2D LiDAR sensor fires laser pulses continuously, rotating
+through all 360 directions once every ~100ms (10Hz). Each rotation produces an
+array of exactly 360 values. Each value is the distance in meters to whatever
+solid object that beam hit at that specific angle.
+
+Real-world LiDAR is messy. Three types of bad readings are very common:
+  - Beams that shoot into empty open space return "inf" or "NaN" (no return).
+  - Beams that hit glass, shiny metal, or dust particles return random wrong values.
+  - Beams closer than the sensor's physical minimum range return invalid values.
+
+None of these reflect real walls or obstacles, so they must be cleaned immediately,
+before any math is done on the data.
+
+
+PART 2: STAGE 1 — DATA CLEANING (lidar_analyzer_node.py)
+----------------------------------------------------------
+As soon as a new scan arrives, the analyzer node does two cleaning operations:
+
+Operation A — Invalid Reading Replacement
+  All NaN, Inf, and below-min-range readings are replaced with the sensor's maximum
+  range value (e.g., 30.0 meters). This is philosophically correct: if we can't
+  confirm something is there, we assume wide open space. This is a conservative
+  choice that prevents false obstacle detection.
+
+Operation B — 1D Spatial Median Filter (Window size: 5 rays)
+  Every ray value is replaced with the mathematical median of itself and its 2
+  nearest neighbors on each side (5 rays total). Median filtering is chosen
+  deliberately over averaging because:
+  - A single spike (noise) surrounded by 4 normal wall readings will have its
+    median equal to the wall reading. The spike is eliminated.
+  - If an actual wall is present, the majority of readings around it also hit the
+    wall. The median preserves the wall perfectly.
+  - Unlike averaging, the median cannot be "pulled" by extreme outliers.
+
+  Result: A clean, continuous 360-array where every value is a trustworthy
+  distance measurement representing the actual physical environment.
+
+
+PART 3: STAGE 2 — ENVIRONMENTAL INTERPRETATION
+------------------------------------------------
+With a clean array, the analyzer extracts structured environmental facts from it.
+This happens in two simultaneous sub-processes:
+
+── Sub-Process A: Sector Minimum Distances + Threat Angles ──────────────────────
+
+Instead of just reading 4 individual rays at 0°, 90°, 180°, 270°, the code divides
+the entire 360-degree sweep into 4 large continuous zones called "sectors":
+
+  FORWARD SECTOR   : ±20°  around the robot's nose
+  LEFT FLANK       : +20° to +110° (the robot's left side)
+  RIGHT FLANK      : -20° to -110° (the robot's right side)
+  REAR HEMISPHERE  : ±110° to ±180° (the robot's back)
+
+For each sector, the code finds two values:
+  1. The MINIMUM distance across the entire zone. This is the closest physical
+     object anywhere in that quadrant. A single ray cannot be missed.
+  2. The ANGLE (relative to the robot's forward direction) at which that minimum
+     distance was recorded. This is critical: knowing the closest object is 0.2m
+     away is much less useful without knowing WHERE it is at 0.2m.
+
+These 8 values (4 distances + 4 angles) form the robot's immediate spatial
+awareness: a 360-degree "proximity bubble" with no blind spots.
+
+── Sub-Process B: Gap Detection + Shape Classification ───────────────────────────
+
+Simultaneously, the code performs a single continuous sweep through all 360 values
+looking for "openings" — places the robot can potentially drive through.
+
+The sweep works like a state machine:
+  - If ray distance > 0.8m (OPEN_THRESHOLD), a gap has started. The code enters
+    "in_gap = True" mode.
+  - It keeps accumulating rays as long as they stay above 0.8m.
+  - The moment a ray drops below 0.8m (a wall begins), the gap ends.
+
+For every completed gap, three computations are performed:
+
+  1. Physical Width (Law of Cosines):
+     The code takes the two solid boundary points on either side of the gap
+     (the last wall-ray on the right and the first wall-ray on the left) and
+     calculates their true Euclidean distance using the Law of Cosines formula:
+       Width = sqrt(R1² + R2² - 2·R1·R2·cos(AngularSpan))
+     This works for ANY gap geometry regardless of shape — a flat doorway, a
+     round hollow, or an asymmetric L-turn entry all give correct measurements.
+
+  2. Passability Flag:
+     If Width ≥ 1.5 × RobotWidth (0.525m), the gap is "passable". This 1.5x
+     safety margin means the robot always has clearance on both sides.
+
+  3. Shape Classification (Dmax Method — adapted from IEEE research paper):
+     All interior LiDAR ray endpoints within the gap are converted into (X, Y)
+     Cartesian coordinates. A straight baseline is drawn between the two solid
+     boundary wall points. For every interior point, the perpendicular distance
+     from that point to the baseline is measured. The maximum deviation is Dmax.
+
+       If Dmax ≥ 20% of baseline length:  → "curved"
+         (Interior arcs away from baseline. Gap leads into a curved passage.)
+
+       If boundary walls differ by > 0.4m: → "asymmetric"
+         (One wall is much farther than the other. L-shaped or angled entry.)
+
+       Otherwise:                           → "flat"
+         (Uniform straight opening, like a doorway or wide corridor.)
+
+  The shape tag helps the nav node adopt the correct entry strategy:
+  "curved" gaps need extra early steering, "asymmetric" gaps need a wider swing.
+
+
+PART 4: STAGE 3 — MESSAGE PACKAGING AND PUBLISHING
+----------------------------------------------------
+All structured results are packed into a single custom ROS message: LidarAnalysis.
+This is published at 10Hz on /lidar/analysis. It completely abstracts the nav node
+from raw sensor data. The nav node never sees a single laser beam.
+
+The message contains:
+  forward_dist, left_dist, right_dist, back_dist:
+    Float32 sector minimums in meters. Closest physical threat per quadrant.
+
+  forward_threat_angle, left_threat_angle, right_threat_angle, back_threat_angle:
+    Float32 relative angles (radians) pinpointing exactly where in each sector the
+    closest threat is located. 0 = straight ahead, positive = left, negative = right.
+
+  is_u_shape:
+    Boolean. True if forward, left, AND right sectors are all within 2.5m.
+    Indicates a 3-walled dead-end where the only exit is behind the robot.
+
+  corridor_width_lateral:
+    Float32. Estimated total width of the current passage in meters.
+
+  opening_angles_rad[], opening_widths_m[], opening_passable[], opening_shapes[]:
+    Parallel arrays describing every detected gap. Index 0 across all arrays
+    describes the same gap. Angles in radians, widths in meters, passability as
+    boolean, shape as string ("flat"/"curved"/"asymmetric").
+
+  best_opening_idx:
+    Integer index pointing to the widest passable opening in the arrays above.
+    The nav node uses this as its primary steering target. -1 if no gap exists.
+
+  no_forward_passage:
+    Boolean. True if forward_dist < 1.2 × RobotWidth. Immediate frontal danger.
+
+
+PART 5: THE NAV CONTROLLER — HOW IT USES THE DATA
+---------------------------------------------------
+The nav controller runs a 20Hz control loop (every 50ms). Every loop, it reads the
+latest LidarAnalysis message and executes one of 3 state behaviors. The ONLY reason
+it knows what to do is the structured data the analyzer sent it.
+
+
+── State: EXPLORE_FORWARD ────────────────────────────────────────────────────────
+
+This is the default state. The robot drives forward, adjusting speed and steering
+purely based on what the LidarAnalysis message tells it about the environment.
+
+  Step 1 — Dynamic Speed Scaling:
+    speed_factor = forward_dist / SLOWDOWN_DIST (1.2m)
+    v_cmd = clamp(V_MAX * speed_factor, V_MIN, V_MAX)
+    As forward_dist shrinks from 1.2m toward 0, speed smoothly ramps from 0.40
+    to 0.12 m/s. The robot decelerates automatically as it approaches any wall.
+
+  Step 2 — Dead-End Check (U-Shape):
+    If is_u_shape is True AND forward_dist < 0.60m, the robot has driven deep
+    into a dead end. It records the current compass heading (u_turn_entry_yaw)
+    and transitions to U_TURN_RECOVERY.
+
+  Step 3 — Soft Cornering (L-Shape Pre-Detection):
+    If forward_dist < 1.8m (approaching wall ahead) AND one side is open (>1.5m)
+    while the other is walled (< 1.2m), the robot has detected an L-shaped corner
+    BEFORE entering it. It immediately drops v_cmd to V_MIN (0.12 m/s).
+    This is not reactive — it is predictive. The robot slows BEFORE the hard part.
+    The purpose is to reduce centrifugal force and allow cleaner steering arcs.
+
+  Step 4 — Gap Steering:
+    If best_opening_idx ≥ 0, the robot reads opening_angles_rad[best_opening_idx]
+    and passes that angle as its target steering command. The robot physically
+    orients its nose toward the widest available passage.
+
+    NOTE: This is where gap shape becomes useful in future iterations. A "curved"
+    gap could trigger an earlier, wider arc. An "asymmetric" gap could shift the
+    entry steer angle toward the open side.
+
+
+── State: U_TURN_RECOVERY ────────────────────────────────────────────────────────
+
+The robot sits in-place and rotates. No forward movement.
+
+  It continuously monitors two exit conditions (BOTH must be true):
+    1. yaw_diff > 2.6 rad (~150°): The robot has turned far enough from its entry
+       heading to guarantee it is facing away from the dead-end wall.
+    2. forward_dist > 1.5m: There is confirmed open space ahead.
+
+  The yaw_diff calculation uses angle wrapping to correctly handle the
+  transition around ±180° (the discontinuity that would otherwise cause the
+  controller to think it completed a U-turn instantly).
+
+  When both conditions are met, the robot returns to EXPLORE_FORWARD.
+
+
+── CONTINUOUS SAFETY OVERRIDES INSIDE _move() ────────────────────────────────────
+
+Every single command sent to /cmd_vel (regardless of which state computed it)
+passes through _move(). _move() applies three sequential safety checks that can
+modify or override the commanded velocity and steering.
+
+  Override 1 — Soft Corridor Centering:
+    TRIGGERED WHEN: left_dist < 1.5m AND right_dist < 1.5m (inside a corridor)
+    WHAT IT DOES:
+      diff = right_dist - left_dist
+      w += diff × 0.5 (proportional gain)
+    EFFECT: If the robot drifts 3cm toward the left wall, left_dist decreases and
+    right_dist increases. diff becomes negative, which adds rightward steering until
+    the robot recenters. This is a continuous P-controller running at 20Hz.
+    This operates at LOW gain (0.5) and handles gradual drift correction only.
+    It does NOT handle emergency wall contact.
+
+  Override 2 — Wall Repulsion (Emergency):
+    TRIGGERED WHEN: left_dist < 0.25m OR right_dist < 0.25m
+    WHAT IT DOES:
+      if left too close:  w -= 0.6 rad/s (hard right steer injected)
+      if right too close: w += 0.6 rad/s (hard left steer injected)
+    EFFECT: At 0.25m, the robot is seconds from scraping the wall.
+    A large, sudden angular impulse overrides whatever the state machine commanded.
+    The robot is physically flung away from the wall.
+    This is at HIGH gain (0.6) and is the last line of defence before contact.
+
+    IMPORTANT: The final w is then clamped to ± (W_TURN × 1.5) = ±0.825 rad/s.
+    Even combined soft centering + repulsion cannot exceed this. The robot cannot
+    swerve wildly enough to hit the opposite wall.
+
+  Override 3 — Emergency Brake with Clearance Reverse:
+    TRIGGERED WHEN: forward_dist < STOP_DIST (0.28m, or 0.20m in MAZE state)
+    WHAT IT DOES:
+      if back_dist > 0.3m: v = -0.06 m/s (soft reverse)
+      else:                 v = 0.0 (full stop, trapped)
+    EFFECT: Spinning in-place when the front is blocked would swing the robot's
+    rectangular corners INTO the wall. Instead the robot backs away slowly while
+    still turning. This creates the physical clearance needed for the chassis
+    geometry to complete the turn without corner contact.
+
+
+── Stuck Recovery (_check_stuck) ─────────────────────────────────────────────────
+
+Running every 50ms, the stuck checker compares the robot's current position to
+where it was. If the robot has NOT moved more than 10cm over the last 5 seconds,
+it initiates emergency recovery.
+
+The critical safety step: it consults lidar.back_dist BEFORE reversing.
+  - If back_dist > 0.4m: execute -0.20 m/s high-power reverse to dislodge.
+  - If back_dist ≤ 0.4m: the rear is blocked too. Spin in place instead.
+    Spinning while stuck against two walls will eventually dislodge the robot
+    from whichever lip or corner it is caught on.
+
+
+PART 6: WHY THIS WORKS FOR ANY ARENA (Answer to Question 4)
+------------------------------------------------------------
+The reactive LiDAR pipeline described here makes ZERO assumptions about the
+specific shape, size, or layout of the arena. It does not use a pre-built map.
+It does not store any memory of where it has been. It only answers one question
+every 50ms: "Given what my sensors see RIGHT NOW, what is the safest command
+to issue to my wheels?"
+
+This means:
+  - New maze layout? The sector minimums still correctly identify nearby walls.
+  - Curved corridors instead of straight ones? The gap shape classifier detects
+    "curved" and the entry strategy can be adapted.
+  - Wider or narrower paths? The passability threshold (1.5 × robot width) is a
+    physical dimension ratio, not an arena-specific hardcoded number.
+  - Different total size? Entirely irrelevant. The robot navigates locally.
+  - Unexpected obstacles added mid-run? The 10Hz scan update detects them
+    immediately. No re-mapping required.
+  - Starting position changed? The robot's coordinate system is relative to its
+    own forward direction, not GPS or world coordinates.
+
+The ONLY parameters that might need adjustment for a very different arena are:
+  - OPEN_THRESHOLD (0.8m): If the arena has extremely wide passages or very
+    tight ones, this threshold for "is this space open?" may need tuning.
+  - CLOSED_ROW_DEPTH (2.5m): If dead-ends are much longer or shorter, this
+    threshold for U-shape detection needs to match the expected dead-end depth.
+  - SLOWDOWN_DIST (1.2m) and STOP_DIST (0.28m): If the arena walls are further
+    apart and the robot can go faster, these distances can be increased to allow
+    higher speed traversal.
+
+All of these are single constant values at the top of each file. The core
+algorithmic logic — filtering, sector sensing, gap detection, shape classification,
+layered safety overrides — transfers completely to any 2D indoor environment.
+================================================================================
+END OF DOCUMENT
+================================================================================

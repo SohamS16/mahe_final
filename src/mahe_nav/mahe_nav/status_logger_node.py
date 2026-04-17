@@ -135,7 +135,7 @@ class StatusLoggerNode(Node):
         # Periodic Summary Box
         lines = [
             '---------------------------------------------------',
-            f'| STATUS @ {elapsed:6.1s}s | POS: ({self.pose_x:.2f}, {self.pose_y:.2f}) | SIGN: {self.last_sign_name}',
+            f'| STATUS @ {elapsed:6.1f}s | POS: ({self.pose_x:.2f}, {self.pose_y:.2f}) | SIGN: {self.last_sign_name}',
             f'| ARUCO SEEN: {seen}',
             '---------------------------------------------------'
         ]

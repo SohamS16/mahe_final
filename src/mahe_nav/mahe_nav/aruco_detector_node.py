@@ -9,8 +9,18 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, Pose2D
+from nav_msgs.msg import Odometry
 from mahe_nav_interfaces.msg import ArucoDetection
+
+# === PORTED: ARUCO POSE CORRECTION ===
+MARKER_WORLD_POS = {
+    0: (1.796,  0.975),
+    1: (0.450, -0.441),
+    2: (1.320, -1.341),
+    3: (1.796, -1.875),
+    4: (-0.450, 1.341),
+}
 
 # Dictionary and Marker Specs
 ARUCO_DICT_ID = cv2.aruco.DICT_APRILTAG_36h11
@@ -47,10 +57,15 @@ class ArucoDetectorNode(Node):
         self.dist_coeffs = None
         self.seen_ids = set()
         self.sighting_counts = defaultdict(int) 
+        self.pose_yaw = 0.0
 
         # ROS 2 Interfaces
         sensor_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.pub_detection = self.create_publisher(ArucoDetection, '/aruco/detections', 10)
+        
+        # === PORTED: ARUCO POSE CORRECTION ===
+        self.pub_pose_correction = self.create_publisher(Pose2D, '/aruco/pose_correction', 10)
+        self.create_subscription(Odometry, '/odom_fused', self._odom_cb, 10)
         
         self.create_subscription(CameraInfo, self.get_parameter('info_topic').value, 
                                  self._info_cb, sensor_qos)
@@ -58,6 +73,13 @@ class ArucoDetectorNode(Node):
                                  self._image_cb, sensor_qos)
 
         self.get_logger().info('ArUco Detector Initialized')
+
+    # === PORTED: ARUCO POSE CORRECTION ===
+    def _odom_cb(self, msg):
+        q = msg.pose.pose.orientation
+        self.pose_yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def _info_cb(self, msg):
         self.camera_matrix = np.array(msg.k).reshape(3, 3)
@@ -112,6 +134,19 @@ class ArucoDetectorNode(Node):
             # Populate raw 6-DOF fields so downstream nodes can compute accurate pose
             det_msg.tvec = [float(tvec[0]), float(tvec[1]), float(tvec[2])]
             det_msg.rvec = [float(rvec.flatten()[0]), float(rvec.flatten()[1]), float(rvec.flatten()[2])]
+
+            # === PORTED: ARUCO POSE CORRECTION ===
+            if mid in MARKER_WORLD_POS and distance <= 0.8:
+                mx, my = MARKER_WORLD_POS[mid]
+                world_angle = self.pose_yaw + bearing_rad
+                corrected_x = mx - distance * math.cos(world_angle)
+                corrected_y = my - distance * math.sin(world_angle)
+                
+                corr_msg = Pose2D()
+                corr_msg.x = corrected_x
+                corr_msg.y = corrected_y
+                corr_msg.theta = self.pose_yaw
+                self.pub_pose_correction.publish(corr_msg)
 
             det_msg.first_detection = mid not in self.seen_ids
             if det_msg.first_detection:

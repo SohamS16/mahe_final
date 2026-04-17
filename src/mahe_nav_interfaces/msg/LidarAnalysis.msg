@@ -39,3 +39,7 @@ int32 best_opening_idx
 
 # True if the robot appears to be stuck (no passable forward motion)
 bool no_forward_passage
+string junction_type
+float32 wall_alignment_error_rad
+bool cylinder_detected
+float32 cylinder_bearing_rad

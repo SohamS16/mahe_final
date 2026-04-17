@@ -1,0 +1,499 @@
+Proceeding of the 2015 IEEE
+International Conference on Information and Automation
+Lijiang, China, August 2015
+
+The Obstacle Detection and Obstacle Avoidance
+Algorithm Based on 2-D Lidar
+Yan Peng, Dong Qu , Yuxuan Zhong,
+Shaorong Xie, Jun Luo
+
+Jason Gu
+
+Department of Mechatronic Engineering
+Shanghai University, Shanghai, China
+
+Department of Electrical & Computer Engineering
+Dalhousie University, Halifax, NS B3J2X4 Canada
+
+qu_0821@163.com
+
+Jason.gu@dal.ca
+visible graph method, they all have the advantages of a simple
+mathematical model and good real-time performance. The
+theory of artificial potential field (APF) was proposed by
+Khatib, he defined the influence of the target on the robot as
+virtual attractive force, and the influence of obstacles on the
+robot as virtual repulsive force, the direction of the resultant
+force is also the direction of the next movement of the robot
+[6]. The traditional artificial potential field method has some
+problems, such as local optimal solution, and target
+inaccessible when robot is near to the target. There are some
+improved artificial potential field methods combined with the
+fuzzy rules [7], genetic algorithm [8], and regression search
+method [10] respectively. The visual graph method can be
+used to judge if the line between the robot and the target cross
+the obstacle, no cross represents the target is visible, the robot
+can reach the target point directly, Otherwise, choose one of
+the connecting line from the robot to the ends of obstacle as
+the direction of traffic [12][14].
+This paper proposed a simple and practical obstacle
+detection method based on the 2-D lidar LMS511 from SICK
+SENSOR, and also designed an obstacle avoidance algorithm
+in the light of the results of the obstacle detection, which is
+based on visibility graph method, and the validity of the
+algorithm is verified on the MATLAB simulation platform.
+
+Abstract - Obstacle avoidance ability is the significant
+embodiment of the ground mobile robot, and the basic guarantee
+of the ground mobile robot to perform various tasks. Obstacle
+avoidance technologies are divided into two kinds, one is based
+on the global map and another is based on sensors respectively.
+This paper mainly aims at the local obstacle avoidance method
+based on sensors. The study of obstacle detection and obstacle
+avoidance are two inseparable parts in the research of obstacle
+avoidance ability. This paper proposes an efficient obstacle
+detection and obstacle avoidance algorithm based on 2-D lidar. A
+method is proposed to get the information of obstacles by
+filtering and clustering the laser-point cloud data. Also, this
+method generates the forward angle and velocity of robot based
+on the principle of minimum cost function. The obstacle detection
+and obstacle avoidance algorithm has advantages of a simple
+mathematical model and good real-time performance. The
+effectiveness of the proposed algorithm is verified on MATLAB
+simulation platform.
+Index Terms – 2-D lidar; obstacle detection; obstacle
+clustering; obstacle avoidance
+
+I. INTRODUCTION
+Obstacle avoidance technology is a hotspot in the field of
+the ground mobile robot, also is one of the most important
+embodiment of the intelligent robot. Good performance of
+obstacle avoidance is the basic premise of robot on a particular
+task.
+The technology of obstacle avoidance can be divided into
+two parts, one is global obstacle avoidance method based on
+the known environment information and another is local
+obstacle avoidance method based on the information from
+sensors. This paper is mainly focused on the local obstacle
+avoidance method based on the information from 2-D lidar.
+Lidar has the advantages of high precision, large detection
+range, and fast sweep frequency. It is widely used in the
+obstacle detection field of the ground mobile robot [1]. Lidar
+can be divided into 2D lidar and 3D lidar. 3D lidar can get the
+height information of obstacles, so it is suitable for bumpy
+environment, such as the sea, field, etc. But its data is large
+which costs more processing time, meanwhile the price of 3-D
+lidar is higher than 2-D lidar [2-4]. This paper is focuses on
+the 2-D lidar for its low price and more fast processing time.
+The most commonly used local obstacle avoidance
+method is the artificial potential field method (APF) and
+
+978-1-4673-9104-7/15/$31.00 ©2015 IEEE
+
+II. 2-D LIDAR
+LMS511 is a two dimensional lidar of SICK
+SENSOR used in field (Fig. 1), measuring range up to
+80 meters. Its horizontal scan range from -5° to +185°,
+angle resolution is set to 1°, once scan can get 191 laser
+points, also called laser-point cloud (Fig. 2). Assume
+that the distance of the laser point I is Ri, The position of
+this laser point in Rectangular coordinate system with
+the origin of lidar can be obtained as (Xi, Yi):
+Xi = Ri * cos(i - 5)
+Yi = Ri * sin(i - 5)
+
+(1)
+
+i ∈ (0,190)
+
+Since the lidar is in single plane scanning,
+considering the lidar is installed on the ground mobile
+
+1648
+
+Authorized licensed use limited to: Dalhousie University. Downloaded on June 28,2021 at 16:58:44 UTC from IEEE Xplore. Restrictions apply.
+
+robot may encounter low obstacles. Install the lidar in a
+slightly downward sloping way when use it, set the
+sloping angle as a (Fig.3). Therefore, the distance value
+need to be revised, the revised point coordinates of laser
+can be expressed as following:
+
+Xi = Ri * cos(i - 5)* cos(a)
+Yi = Ri * sin(i - 5)* cos(a)
+
+(2)
+
+i ∈ (0,190)
+
+Fig.4 Obstacle detection algorithm process
+
+Obstacle detection process is mainly divided into three
+steps: the filter, preprocess, and obstacle clustering.
+
+Fig. 1 SICK LMS511
+
+A. Median filtering
+Using a 3*3 median filtering window at the laser-point
+cloud data, set the current time as t, and the value of laser
+point i is R(t, i), Then build the 3*3 median filtering window
+shown as following:
+
+[ R(t - 1,i - 1), R(t - 1,i), R(t - 1,i + 1)
+R(t,i - 1), R(t,i), R(t,i + 1)
+R(t + 1,i - 1), R(t + 1,i), R(t + 1,i + 1)]
+Take the median of the 9 numbers as the value of the
+distance between robot and the laser point i at the time t, this
+method can give attention to both space and time, filtering out
+the occasional noise points, reducing the complexity of the
+obstacle clustering.
+
+Fig. 2 Origin data of lidar.
+
+Fig.3 Lidar downward sloping angle a
+
+III. OBSTACLE DETECTION ALGORITHM
+Combined with the characteristics of laser-point cloud
+data, this paper proposed an obstacle detection algorithm and
+its process is shown in Figure 4:
+Fig.5 Effect of Median filtering
+
+1649
+Authorized licensed use limited to: Dalhousie University. Downloaded on June 28,2021 at 16:58:44 UTC from IEEE Xplore. Restrictions apply.
+
+B. Preprocessing of laser-point cloud data
+The progresses in preprocessing the laser-point cloud data
+is expressed as follows:
+(i) In space order, for segmentation of the 1*381 laser-point
+cloud sequence, set i as the index value of those 381 laser
+points, R(i) is the distance value of the laser point i, so the
+starting index and the termination index of each block of
+independent laser-point cloud blocks are start(i) and stop(i)
+respectively, among which start(i) satisfies
+( R(i -1) == 0) & &( R(i)! = 0)
+
+i ∈ [1, num ] , the calculation method of R(i) can be expressed
+
+as following:
+R(i) = R(p)+ i *
+
+(3)
+
+(4)
+
+(ii) Assuming the 381 laser points are divided into N blocks at
+the step (i), splitting each of the laser-point cloud blocks, the
+conditions for separation is when the distance between point i
+assumed to be (x(i),y(i)) and point i+1 assumed to be
+(x(i+1),y(i+1)) is greater than the value of the width of the
+robot multiply the amplification factor k.
+2
+2
+d = [x(i) - x(i + 1)] + [y(i) - y(i + 1)]
+
+num
+
+(6)
+
+C. Obstacle clustering
+Assuming after filter and preprocess of the 381 laser
+points, the laser-point cloud is divided into N independent
+laser-point cloud blocks, clustering each block of laser points,
+i ∈ (0, N) , set the starting point index value and termination
+point index value of block i are p and q respectively.
+Clustering methods can be divided into three types: circular,
+linear and rectangle. The judgment condition is expressed as
+following:
+(i) If the amount of laser points in a laser-point cloud block is
+x, and x is less than 5, the clustering method is circular, get the
+intermediate point O(Xo,Yo) between starting laser point p and
+termination laser point q as the center of a circle, Dj is
+distance between those x laser points and point O,
+j ∈ [ p, q ] ,chose the maximum of Dj as the radius of the
+circle. As shown in the figure 6.
+
+In the same way, stop(i) satisfies
+( R(i )! = 0) & &( R(i + 1) == 0)
+
+R(q) - R(p)
+
+(5)
+
+Xo =
+
+If distance d satisfies the condition: d > k * Width , where
+Width means the width of the robot. Then break the current
+laser-point cloud block into two pieces, and the amount of
+laser-point cloud block plus one time.
+
+Yo =
+
+Xp + Xq
+2
+Yp + Yq
+2
+
+(7)
+
+r = max(Dj)
+j ∈ [ p,q ]
+
+Fig.5 Segment and merge
+
+(iii) If there are N laser-point cloud blocks, the value of L is
+the space distance between the termination point of laser-point
+cloud block i (set its index value as p in the 381 laser points)
+and the starting point of laser-point cloud block i+1 (set its
+index value as q in the 381 laser points). If the value of L
+satisfies the condition: L < Width , which means the robot
+cannot pass this narrow gap, so consider them to be merged
+into one laser-point cloud block, the calculation just like step
+(ii). Finally, the total number of laser-point cloud block minus
+one time. To make the two combined laser-point cloud blocks
+spatially continuous, we need to give value to those laser
+points cloud between p and q, assuming that there are num
+laser points required the assignment, and the distance value of
+point p is R(p), the distance value of point q is R(q), so
+
+Fig.6 Circular clustering
+
+(ii) If x is greater than 5, set the line L: y=ax+b which
+connecting the starting point p and the termination point q as
+the benchmark, calculate distances between the line L and
+each point between point p and point q, get the maximum
+value as Dmax, |s| is the distance between point p and point q,
+if Dmax < 0.2* S ,the clustering method is linear, returns the
+information of two endpoints which named Point1 and Point2.
+(iii) If Dmax ≥ 0.2* S , the clustering method is rectangle,
+returns the rectangle’s four endpoints which named Point1,
+Point2, Point3 and Point4. In practice, this method can be
+treated as 4 lines. As shown in Figure 7.
+
+1650
+Authorized licensed use limited to: Dalhousie University. Downloaded on June 28,2021 at 16:58:44 UTC from IEEE Xplore. Restrictions apply.
+
+range of lidar to be 60 meters, all of the linear obstacle and
+circular obstacle are in the detection range of lidar, so robot
+chosed the right side of the circular obstacle as the optimal
+traveling direction. As shown in Figure 9.
+According to contrast turning angle generated by Fig. 8
+and Fig. 9, we found that the turning angle in Fig. 9 is more
+reasonable because robot could get more environment
+information with laser range set to be 60 meters.
+Fig.7 Linear and rectangle clustering
+
+IV. OBSTACLE AVOIDANCE ALGORITHM
+Set the robot’s current traveling direction angle to be θ ,
+the termination point is destination, when there is no obstacles,
+the optimum direction is from robot to the Destination, set as
+α ,we get
+
+y - yr
+α = actan( D
+)
+xD - xr
+
+(8)
+
+Among which (x D , y D ) is the terminal point coordinate,
+(xr , y r ) is the current coordinate of the robot. At this point
+the robot’s next steering angle is α - θ .
+When obstacles are detected in the process of moving, and
+if they are without prejudice to the robot’s steering angle
+which make the robot reach the terminal point from the
+current position, the steering angle remains: α - θ .
+In the process of moving, if robot will collide with an
+obstacle in the direction of α , we need to search for a turning
+angle β i at the both sides of angle α which can help the robot
+
+Fig.8 The selection of the optimum direction
+
+avoid obstacles. To speed up the search speed, take 1° as the
+interval, ie
+
+βi = α + i
+i ∈ [-90,90 ]
+
+(9)
+
+In all feasible directions, construct a cost function as
+following:
+
+β = min{ βi - α }
+
+Fig.9 The selection of the optimum direction after
+increasing lidar’s detection range
+
+(10)
+
+Simultaneously, the speed control of robot is also
+designed in consideration of running safety. Assuming that
+is the safe distance, and Ldanger is the dangerous
+L
+
+So the turning angle which can help the robot avoid
+obstacles is α +β . As shown in the Figure 8 and Figure 9.
+The difference between Fig. 8 and Fig. 9 is the laser
+range, for it adopt 50 meters laser range in Fig. 8 compared
+with it adopt 60 meters laser range in Fig. 9.
+Set the laser range to be 50 meters, there are a linear
+obstacle in the left front of the robot and a circular obstacle in
+the right front. Only the right part of the linear obstacle is
+beyond the detection range of lidar, so the robot chose a
+direction as shown in Figure 8. When increasing detection
+
+safe
+
+distance, so the speed control rate can be expressed as
+following:
+⎧Vmax
+Dist >= Lsafe
+⎪
+(11)
+Dist - Ldanger
+⎪
+V = ⎨(0.2 +
+* 0.8)* Vmax , Ldanger <= Dist < Lsafe
+Lsafe - Ldanger
+⎪
+Dist < Ldangeer
+⎪0.2* V
+max
+⎩
+
+1651
+Authorized licensed use limited to: Dalhousie University. Downloaded on June 28,2021 at 16:58:44 UTC from IEEE Xplore. Restrictions apply.
+
+V. SIMULATION TEST
+
+It can be seen from the Figure 12, the obstacle detection
+algorithm proposed in this paper could filter and split the
+laser-point cloud data quickly and effectively, and cluster the
+laser points into linear obstacles and circular obstacles.
+Meanwhile, some simulation tests were carried out on
+MATLAB simulation platform about the robot’s obstacle
+avoidance algorithm. Simulation scenario is an area of 100m *
+100m, (0, 0) is the starting point, (100, 100) is the termination
+point. Setting detection range of lidar to be 50m and 80m
+respectively, a series of circular and linear obstacles were set
+up in those tests, and the results of those tests with the obstacle
+avoidance algorithm proposed in this paper shown is shown in
+Figure 13:
+
+In order to verify the effectiveness of the above-described
+obstacle detection and avoidance algorithms, some robotic
+obstacle detection tests are conducted. The test field is shown
+in Figure 10.
+
+Fig.10 The test scenarios
+
+It contains bushes, walls and wooden boxes in the test
+scene. The laser-point cloud data obtained by lidar was shown
+in Figure 11.
+(a)
+
+Fig.11 The laser-point cloud data of lidar
+
+Import the collected raw data into the obstacle detection
+algorithm, obstacle information after extraction was shown in
+Figure 12.
+
+(b)
+Fig.13 The obstacle avoidance tests in complex environment
+(a) lidar’s detection range is 50m (b) lidar’s detection range is 80m
+
+It can be seen that the greater the detection range of lidar
+was, the more the environmental information could be got, and
+the better the obstacle avoidance path was.
+In obstacle avoidance process, when the obstacles are
+located after the target, destination unreachable problem is
+arisen, the reason is when the robot approaches to the target,
+some obstacles after the target are detected, then robot makes
+an evasive action, so it can’t reach to the target directly, as
+shown in Figure 14. The solution is setting a circular area, of
+which the center is the target point, and r is the radius. When
+moving into this area, the robot begins to estimate whether the
+obstacle on the path blocks robot and target point. If there is
+
+Fig.12 The obstacle information after extraction
+
+1652
+Authorized licensed use limited to: Dalhousie University. Downloaded on June 28,2021 at 16:58:44 UTC from IEEE Xplore. Restrictions apply.
+
+[4] J. Han, D. Kim, M. Lee, and M. Sunwoo, "Enhanced road boundary and
+obstacle detection using a downward-looking LIDAR sensor," Vehicular
+Technology, IEEE Transactions on, vol. 61, pp. 971-985, 2012.
+[5] C. Yu and D. Zhang, "Obstacle detection based on a four-layer laser
+radar," in Robotics and Biomimetics, 2007. ROBIO 2007. IEEE
+International Conference on, 2007, pp. 218-221.
+[6] O. Khatib, "Real-time obstacle avoidance for manipulators and mobile
+robots," The international journal of robotics research, vol. 5, pp. 90-98,
+1986.
+[7] S. Ishaq and S. K. Shivam, "AUTONOMOUS MOBILE ROBOT
+DYNAMIC MOTION PLANNING USING HYBRID FUZZY
+POTENTIAL FIELD."
+[8] Y. Cen, L. Wang, and H. Zhang, "Real-time obstacle avoidance strategy
+for mobile robot based on improved coordinating potential field with
+genetic algorithm," in Control Applications, 2007. CCA 2007. IEEE
+International Conference on, 2007, pp. 415-419.
+[9] J. Sfeir, M. Saad, and H. Saliah-Hassane, "An improved artificial
+potential field approach to real-time mobile robot path planning in an
+unknown environment," in Robotic and Sensors Environments (ROSE),
+2011 IEEE International Symposium on, 2011, pp. 208-213.
+[10] G. Li, A. Yamashita, H. Asama, and Y. Tamura, "An efficient improved
+artificial potential field based regression search method for robot path
+planning," in Mechatronics and Automation (ICMA), 2012 International
+Conference on, 2012, pp. 1227-1232.
+[11] J. Han, D. Kim, M. Lee, and M. Sunwoo, "Enhanced road boundary and
+obstacle detection using a downward-looking LIDAR sensor," Vehicular
+Technology, IEEE Transactions on, vol. 61, pp. 971-985, 2012.
+[12]D. An and H. Wang, "VPH: a new laser radar based obstacle avoidance
+method for intelligent mobile robots," in Intelligent Control and
+Automation, 2004. WCICA 2004. Fifth World Congress on, 2004, pp.
+4681-4685.
+[13]B. You, J. Qiu, and D. Li, "A novel obstacle avoidance method for lowcost household mobile robot," in Automation and Logistics, 2008. ICAL
+2008. IEEE International Conference on, 2008, pp. 111-116. V.J.
+Lumelsky and A.A. Stepanov, “Path-planning strategies for a point
+mobile automaton moving amidst obstacles of arbitrary shape,”
+Algorithmica, vol. 2, pp. 403-430, 1987.
+[14]D. Jie, M. Xueming, and P. Kaixiang, "IVFH : Real-time dynamic
+obstacle avoidance for mobile robots," in Control Automation Robotics &
+Vision (ICARCV), 2010 11th International Conference on, 2010, pp. 844847.
+
+no obstacle across the path, the robot could reach to the target
+directly. Or the robot will apply the avoidance strategy to
+avoid obstacles, as shown in Figure 15.
+
+Fig.14 Destination unreachable problem
+
+Fig.15 The solution of destination unreachable problem
+
+VI. CONCLUSION
+In this paper, the obstacle detection method based on
+SICK LMS511 outdoor lidar can effectively filter the noise
+from raw laser data, segment and cluster the laser-point cloud
+by means of filtering, preprocessing and clustering. The test
+result acquired from an outdoor environment show that the
+obstacle information can be obtained by using this method.
+Meanwhile, this paper proposed a simple obstacle avoidance
+method based on visibility graph method with a MATLAB
+simulation platform which proved its effectiveness in a
+complex scene. Future job will focus on dealing with dynamic
+obstacles with 2-D lidar.
+REFERENCES
+[1] C. Ye and J. Borenstein, "Characterization of a 2-D laser scanner for
+mobile robot obstacle negotiation," in ICRA, 2002, pp. 2512-2518.
+[2] M. Takahashi, K. Kobayashi, K. Watanabe, and T. Kinoshita,
+"Development of prediction based emergency obstacle avoidance module
+by using LIDAR for mobile robot," in Soft Computing and Intelligent
+Systems (SCIS), 2014 Joint 7th International Conference on and
+Advanced Intelligent Systems (ISIS), 15th International Symposium on,
+2014, pp. 561-564.
+[3] F. Fayad and V. Cherfaoui, "Tracking objects using a laser scanner in
+driving situation based on modeling target shape," in Intelligent Vehicles
+Symposium, 2007 IEEE, 2007, pp. 44-49.
+
+1653
+Authorized licensed use limited to: Dalhousie University. Downloaded on June 28,2021 at 16:58:44 UTC from IEEE Xplore. Restrictions apply.
+
+

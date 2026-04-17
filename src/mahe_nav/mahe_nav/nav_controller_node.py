@@ -5,7 +5,7 @@ from enum import Enum, auto
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Pose2D
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from mahe_nav_interfaces.msg import ArucoDetection, SignDetection, LidarAnalysis
@@ -14,6 +14,13 @@ from mahe_nav_interfaces.msg import ArucoDetection, SignDetection, LidarAnalysis
 # --- FIXED: [BUG 2] ---
 ACTION_DISTANCE_THRESHOLD = 0.8
 APPROACH_TRIGGER_DIST     = 1.2   # [FIX 6] Trigger APPROACH_TAG earlier to account for momentum
+
+# === PHASE 1: REPLACE TIME-BASED TURNS WITH YAW-TRACKED TURNS ===
+def _angle_diff(a, b):
+    diff = a - b
+    while diff > math.pi: diff -= 2*math.pi
+    while diff < -math.pi: diff += 2*math.pi
+    return diff
 
 
 # === PHASE 4: FSM ===
@@ -45,15 +52,8 @@ W_SCAN = 0.35   # rad/s — very slow scan
 W_SIGN_TURN = 0.70   # rad/s
 W_SIGN_SPIN = 0.40   # rad/s  [FIX 4] Reduced from 0.60 — pi/0.40 = ~7.85s for true 180deg
 
-# ── ArUco Marker World Positions ─────────────────────────────────────────────
-MARKER_WORLD_POS = {
-    0: (1.796,  0.975),
-    1: (0.450, -0.441),
-    2: (1.320, -1.341),
-    3: (1.796, -1.875),
-    4: (-0.450, 1.341),
-}
-
+# === PORTED: ARUCO POSE CORRECTION === 
+# Removed MARKER_WORLD_POS dict - handled in aruco_detector_node
 
 class NavControllerNode(Node):
     def __init__(self):
@@ -78,6 +78,13 @@ class NavControllerNode(Node):
         self.last_pos = (0.0, 0.0)
         self.last_progress_time = time.time()
 
+        # === PHASE 1: ADD PD CORRIDOR CENTERING ===
+        self.last_wall_diff = 0.0
+        self.last_center_time = time.time()
+        
+        # === PHASE 1: REPLACE TIME-BASED TURNS WITH YAW-TRACKED TURNS ===
+        self.turn_start_yaw = 0.0
+
         # [FIX 2] Proper halt flag in __init__ instead of hasattr()
         self.has_halted = False
 
@@ -88,6 +95,9 @@ class NavControllerNode(Node):
         self.create_subscription(LidarAnalysis,  '/lidar/analysis',   self._lidar_cb, best_effort)
         self.create_subscription(SignDetection,  '/sign_detection',   self._sign_cb,  best_effort)
         self.create_subscription(ArucoDetection, '/aruco/detections', self._aruco_cb, best_effort)
+        
+        # === PORTED: ARUCO POSE CORRECTION ===
+        self.create_subscription(Pose2D, '/aruco/pose_correction', self._pose_correction_cb, 10)
 
         self.create_timer(0.1, self._fsm_tick)
         self.get_logger().info('NavController: Phase 4 FSM Active')
@@ -102,6 +112,11 @@ class NavControllerNode(Node):
         self.pose_yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    # === PORTED: ARUCO POSE CORRECTION ===
+    def _pose_correction_cb(self, msg):
+        self.pose_x = msg.x
+        self.pose_y = msg.y
 
     def _lidar_cb(self, msg):
         self.lidar = msg
@@ -128,6 +143,10 @@ class NavControllerNode(Node):
         self.state_start_time = time.time()
         self.last_progress_time = time.time()
         self.active_turn_cmd = "NONE"
+
+        # === PHASE 1: REPLACE TIME-BASED TURNS WITH YAW-TRACKED TURNS ===
+        if new_state in (State.TAG_ACTION, State.UTURN):
+            self.turn_start_yaw = self.pose_yaw
 
     def _publish_vel(self, v: float, w: float):
         msg = Twist()
@@ -191,10 +210,15 @@ class NavControllerNode(Node):
                 v_cmd = V_MIN
 
         target_angle, _ = self._select_best_gap()
-        if target_angle is not None:
-            self._move(v_cmd, target_angle)
-        else:
-            self._move(V_MIN, W_SCAN)
+        w_cmd = target_angle if target_angle is not None else W_SCAN
+
+        # === PHASE 1: ADD PD CORRIDOR CENTERING ===
+        if self.lidar.wall_alignment_error_rad != 0.0:
+            if abs(self.lidar.wall_alignment_error_rad) > math.radians(3):
+                w_correction = self.lidar.wall_alignment_error_rad * 0.4
+                w_cmd += w_correction
+
+        self._move(v_cmd, w_cmd)
 
     def _select_best_gap(self):
         FORWARD_CONE = math.radians(35)
@@ -213,9 +237,16 @@ class NavControllerNode(Node):
         return None, None
 
     def _move(self, v: float, w: float):
-        if v > 0.05 and self.lidar.left_dist < 2.0 and self.lidar.right_dist < 2.0:
+        if v > 0.05 and self.lidar.left_dist < 1.5 and self.lidar.right_dist < 1.5:
+            # === PHASE 1: ADD PD CORRIDOR CENTERING ===
+            now = time.time()
+            dt = max(now - self.last_center_time, 0.01)
             diff  = self.lidar.right_dist - self.lidar.left_dist
-            w    += diff * 0.4
+            p_term = 0.6 * diff
+            d_term = 0.3 * (diff - self.last_wall_diff) / dt
+            w += p_term + d_term
+            self.last_wall_diff = diff
+            self.last_center_time = now
         REPULSION_DIST = 0.30
         if self.lidar.left_dist  < REPULSION_DIST: w -= 0.55
         if self.lidar.right_dist < REPULSION_DIST: w += 0.55
@@ -290,8 +321,9 @@ class NavControllerNode(Node):
             self._transition(State.RECOVERY)
             return
 
-        # Phase 4 Rule 2: Non-blocking turn execution (4.0 seconds)
-        if elapsed < 4.0:
+        # === PHASE 1: REPLACE TIME-BASED TURNS WITH YAW-TRACKED TURNS ===
+        yaw_turned = abs(_angle_diff(self.pose_yaw, self.turn_start_yaw))
+        if yaw_turned < math.radians(87):
             if self.active_turn_cmd == "LEFT":
                 self._publish_vel(0.0, +W_SIGN_TURN)
             elif self.active_turn_cmd == "RIGHT":
@@ -388,8 +420,9 @@ class NavControllerNode(Node):
             self._transition(State.RECOVERY)
             return
 
-        # [FIX 4] W_SIGN_SPIN=0.40 rad/s × ~7.85s = pi rad = true 180deg
-        if elapsed < 7.9:
+        # === PHASE 1: REPLACE TIME-BASED TURNS WITH YAW-TRACKED TURNS ===
+        yaw_turned = abs(_angle_diff(self.pose_yaw, self.turn_start_yaw))
+        if yaw_turned < math.radians(177):
             self._publish_vel(0.0, +W_SIGN_SPIN)
         else:
             self._publish_vel(0.0, 0.0)

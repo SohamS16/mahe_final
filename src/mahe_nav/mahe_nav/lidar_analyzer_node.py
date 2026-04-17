@@ -172,6 +172,47 @@ class LidarAnalyzerNode(Node):
         rgt_d  = sector_min(idx_rgt_front, idx_rgt_back)
         bck_d  = sector_min(idx_back_left, idx_back_rgt)
 
+        # === PHASE 1: ADD junction_type TO LidarAnalysis MESSAGE ===
+        if fwd_d >= 0.6 and (left_d < 0.6 or rgt_d < 0.6):
+            junction_type = "CORRIDOR"
+        elif fwd_d >= 0.6 and left_d >= 0.6 and rgt_d < 0.6:
+            junction_type = "LEFT_JUNCTION"
+        elif fwd_d >= 0.6 and rgt_d >= 0.6 and left_d < 0.6:
+            junction_type = "RIGHT_JUNCTION"
+        elif fwd_d < 0.6 and left_d >= 0.6 and rgt_d >= 0.6:
+            junction_type = "T_JUNCTION"
+        elif fwd_d >= 0.6 and left_d >= 0.6 and rgt_d >= 0.6:
+            junction_type = "CROSSROADS"
+        else: # fwd_d < 0.6 and left_d < 0.6 and rgt_d < 0.6
+            junction_type = "DEAD_END"
+
+        # === PHASE 1: ADD wall_alignment_error_rad TO LidarAnalysis MESSAGE ===
+        wall_alignment_error_rad = 0.0
+        if junction_type == "CORRIDOR":
+            def get_closest_pts(base_idx, spread=30, count=20):
+                pts = []
+                for k in range(-spread, spread+1):
+                    i = (base_idx + k) % n
+                    rel_ang = (msg.angle_min + i * msg.angle_increment) - (msg.angle_min + self.FORWARD * msg.angle_increment)
+                    pts.append((float(smooth[i]), rel_ang))
+                pts.sort(key=lambda x: x[0])
+                return pts[:count]
+            
+            def fit_wall_angle(pts):
+                xs = [r * math.cos(ang) for r, ang in pts]
+                ys = [r * math.sin(ang) for r, ang in pts]
+                if len(xs) > 1:
+                    try:
+                        m, _ = np.polyfit(xs, ys, 1)
+                        return math.atan(m)
+                    except Exception:
+                        return 0.0
+                return 0.0
+                
+            left_pts = get_closest_pts(self.LEFT)
+            rgt_pts  = get_closest_pts(self.RIGHT)
+            wall_alignment_error_rad = float((fit_wall_angle(left_pts) + fit_wall_angle(rgt_pts)) / 2.0)
+
         # ── Threat angles: WHERE inside each sector is the closest object ───────
         def sector_argmin_angle(start_idx: int, end_idx: int) -> float:
             """Returns relative angle (rad, 0=fwd, +ve=left) of closest point."""
@@ -241,9 +282,57 @@ class LidarAnalyzerNode(Node):
                 best_w   = w
                 best_idx = j
 
+        # === PHASE 1: ADD cylinder_detected AND cylinder_bearing_rad TO LidarAnalysis MESSAGE ===
+        angles_all = np.array([msg.angle_min + i * msg.angle_increment for i in range(n)])
+        fwd_ang = msg.angle_min + self.FORWARD * msg.angle_increment
+        rel_angles = angles_all - fwd_ang
+        xs_all = smooth * np.cos(rel_angles)
+        ys_all = smooth * np.sin(rel_angles)
+
+        cylinder_detected = False
+        cylinder_bearing_rad = 0.0
+        best_r2 = 0.0
+
+        for i in range(n):
+            idx = [(i + j) % n for j in range(15)]
+            x_win = xs_all[idx]
+            y_win = ys_all[idx]
+            
+            # Algebraic circle fit (least squares) x^2 + y^2 = A*x + B*y + C
+            z = x_win**2 + y_win**2
+            M = np.c_[x_win, y_win, np.ones(15)]
+            try:
+                p, _, _, _ = np.linalg.lstsq(M, z, rcond=None)
+                xc, yc = p[0]/2, p[1]/2
+                r_sq = p[2] + xc**2 + yc**2
+                if r_sq <= 0:
+                    continue
+                r_opt = math.sqrt(r_sq)
+                
+                # Calculate R^2
+                ri = np.sqrt((x_win - xc)**2 + (y_win - yc)**2)
+                ss_res = np.sum((ri - r_opt)**2)
+                ss_tot = np.sum((x_win - np.mean(x_win))**2 + (y_win - np.mean(y_win))**2)
+                r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+                
+                center_dist = math.hypot(xc, yc)
+                
+                if 0.05 <= r_opt <= 0.30 and center_dist < 3.0 and r2 > 0.90:
+                    if r2 > best_r2:
+                        best_r2 = float(r2)
+                        cylinder_detected = True
+                        cylinder_bearing_rad = float(math.atan2(yc, xc))
+            except Exception:
+                pass
+
         # ── Build and publish message ───────────────────────────────────────────
         out                         = LidarAnalysis()
         out.header                  = msg.header
+        # === PHASE 1: AUGMENT LidarAnalysis ===
+        out.junction_type           = junction_type
+        out.wall_alignment_error_rad = wall_alignment_error_rad
+        out.cylinder_detected       = cylinder_detected
+        out.cylinder_bearing_rad    = cylinder_bearing_rad
         out.forward_dist            = fwd_d
         out.left_dist               = left_d
         out.right_dist              = rgt_d
