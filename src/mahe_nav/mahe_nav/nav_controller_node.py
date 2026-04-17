@@ -314,7 +314,18 @@ class NavControllerNode(Node):
                     f'[SIGN] LEFT blocked — left_dist={self.lidar.left_dist:.2f}m < '
                     f'{TURN_AHEAD_SIDE_THRESH}m — aborting')
                 return False
-            self._start_pivot(w=+W_SIGN_TURN, target_deg=90.0, sign_type=sign_type)
+            # --- FIXED: TURN EXECUTION ---
+            self.executing_command = True
+            self.get_logger().info("[ARUCO EXECUTION] Starting LEFT - Pausing all nav for 4.0 seconds")
+            msg = Twist()
+            msg.linear.x = 0.0
+            msg.angular.z = +0.4
+            self.pub_cmd.publish(msg)
+            time.sleep(4.0)
+            msg.angular.z = 0.0
+            self.pub_cmd.publish(msg)
+            self.executing_command = False
+            self.get_logger().info("[ARUCO EXECUTION] Turn complete - Resuming normal navigation")
 
         elif sign_type == "RIGHT":
             if self.lidar and self.lidar.right_dist < TURN_AHEAD_SIDE_THRESH:
@@ -322,10 +333,32 @@ class NavControllerNode(Node):
                     f'[SIGN] RIGHT blocked — right_dist={self.lidar.right_dist:.2f}m < '
                     f'{TURN_AHEAD_SIDE_THRESH}m — aborting')
                 return False
-            self._start_pivot(w=-W_SIGN_TURN, target_deg=90.0, sign_type=sign_type)
+            # --- FIXED: TURN EXECUTION ---
+            self.executing_command = True
+            self.get_logger().info("[ARUCO EXECUTION] Starting RIGHT - Pausing all nav for 4.0 seconds")
+            msg = Twist()
+            msg.linear.x = 0.0
+            msg.angular.z = -0.4
+            self.pub_cmd.publish(msg)
+            time.sleep(4.0)
+            msg.angular.z = 0.0
+            self.pub_cmd.publish(msg)
+            self.executing_command = False
+            self.get_logger().info("[ARUCO EXECUTION] Turn complete - Resuming normal navigation")
 
         elif sign_type == "INPLACE_ROTATION":
-            self._start_pivot(w=+W_SIGN_SPIN, target_deg=180.0, sign_type=sign_type)
+            # --- FIXED: TURN EXECUTION ---
+            self.executing_command = True
+            self.get_logger().info("[ARUCO EXECUTION] Starting U-TURN - Pausing all nav for 8.0 seconds")
+            msg = Twist()
+            msg.linear.x = 0.0
+            msg.angular.z = +0.4
+            self.pub_cmd.publish(msg)
+            time.sleep(8.0)
+            msg.angular.z = 0.0
+            self.pub_cmd.publish(msg)
+            self.executing_command = False
+            self.get_logger().info("[ARUCO EXECUTION] Turn complete - Resuming normal navigation")
 
         elif sign_type == "STOP":
             self._move_sign(0.0, 0.0)
@@ -367,6 +400,10 @@ class NavControllerNode(Node):
     # ── Control Loop ─────────────────────────────────────────────────────────
 
     def _control_loop(self):
+        # --- FIXED: TURN EXECUTION ---
+        if self.executing_command:
+            return
+            
         if not self.lidar:
             return
 
@@ -550,6 +587,10 @@ class NavControllerNode(Node):
         corrections would corrupt a deliberate pivot angular.z command.
         Only the emergency forward brake remains active.
         """
+        # --- FIXED: TURN EXECUTION ---
+        if self.executing_command:
+            return
+            
         if not self.lidar:
             return
         # Emergency brake only
@@ -567,6 +608,10 @@ class NavControllerNode(Node):
         Applies corridor centering, wall repulsion, and emergency brake.
         NOT used during SIGN_EXECUTE.
         """
+        # --- FIXED: TURN EXECUTION ---
+        if self.executing_command:
+            return
+            
         if not self.lidar:
             return
 
