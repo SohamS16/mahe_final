@@ -10,8 +10,11 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from mahe_nav_interfaces.msg import ArucoDetection, SignDetection, LidarAnalysis
 
+
 # --- FIXED: [BUG 2] ---
 ACTION_DISTANCE_THRESHOLD = 0.8
+APPROACH_TRIGGER_DIST     = 1.2   # [FIX 6] Trigger APPROACH_TAG earlier to account for momentum
+
 
 # === PHASE 4: FSM ===
 class State(Enum):
@@ -40,7 +43,7 @@ W_SCAN = 0.35   # rad/s — very slow scan
 
 # Turn angular rates
 W_SIGN_TURN = 0.70   # rad/s
-W_SIGN_SPIN = 0.60   # rad/s
+W_SIGN_SPIN = 0.40   # rad/s  [FIX 4] Reduced from 0.60 — pi/0.40 = ~7.85s for true 180deg
 
 # ── ArUco Marker World Positions ─────────────────────────────────────────────
 MARKER_WORLD_POS = {
@@ -60,20 +63,23 @@ class NavControllerNode(Node):
         self.state = State.EXPLORE
         self.state_start_time = time.time()
         self.logged_tags = set()
-        
+
         self.pose_x = self.pose_y = self.pose_yaw = 0.0
         self.lidar = None
         self.latest_sign = None
         self.latest_aruco = None
-        
+
         self.PASSABLE_THR = 0.525
-        
+
         # Turn execution / state trackers
-        self.active_turn_cmd = "NONE" # NONE, LEFT, RIGHT
+        self.active_turn_cmd  = "NONE"   # NONE, LEFT, RIGHT
         self.uturn_post_state = State.EXPLORE
         self.indicator_blue_arrow = False
         self.last_pos = (0.0, 0.0)
         self.last_progress_time = time.time()
+
+        # [FIX 2] Proper halt flag in __init__ instead of hasattr()
+        self.has_halted = False
 
         # ROS 2 interfaces
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -85,6 +91,7 @@ class NavControllerNode(Node):
 
         self.create_timer(0.1, self._fsm_tick)
         self.get_logger().info('NavController: Phase 4 FSM Active')
+
 
     # ── Callbacks (Pure State Modifiers) ─────────────────────────────────────
 
@@ -102,8 +109,8 @@ class NavControllerNode(Node):
     def _sign_cb(self, msg):
         self.latest_sign = msg
         sign_type = msg.sign_type.upper() if msg.sign_type else "NONE"
-        
-        # Phase 4 Rule 1: Massive Red tile check via pixel width (>70 px ~ 4900/5000 px sq)
+
+        # Phase 4 Rule 1: Massive Red tile check via pixel width (>70px ~ 5000px sq)
         if sign_type == "GOAL" and (msg.pixel_width * msg.pixel_width > 5000):
             if self.state != State.HALT:
                 self.get_logger().info("━━━ [STATUS] MASSIVE RED TILE DETECTED ━━━")
@@ -112,6 +119,7 @@ class NavControllerNode(Node):
     def _aruco_cb(self, msg: ArucoDetection):
         self.latest_aruco = msg
 
+
     # ── FSM Dispatcher & Helpers ─────────────────────────────────────────────
 
     def _transition(self, new_state: State):
@@ -119,17 +127,18 @@ class NavControllerNode(Node):
         self.state = new_state
         self.state_start_time = time.time()
         self.last_progress_time = time.time()
-        # Reset internal maneuver configs upon transition
         self.active_turn_cmd = "NONE"
 
     def _publish_vel(self, v: float, w: float):
         msg = Twist()
-        msg.linear.x = float(v)
+        msg.linear.x  = float(v)
         msg.angular.z = float(w)
         self.pub_cmd.publish(msg)
 
     def _fsm_tick(self):
-        if not self.lidar and self.state not in (State.HALT,):
+        # [FIX 3] Expanded exclusion list — states that must run even without LiDAR data
+        LIDAR_FREE_STATES = (State.HALT, State.APPROACH_TAG, State.TAG_ACTION, State.UTURN)
+        if not self.lidar and self.state not in LIDAR_FREE_STATES:
             return
 
         match self.state:
@@ -143,11 +152,12 @@ class NavControllerNode(Node):
             case State.RECOVERY:      self._handle_recovery()
             case State.HALT:          self._handle_halt()
 
+
     # ── State Handlers ───────────────────────────────────────────────────────
 
     def _handle_explore(self):
         # Watchdog for stuck prevention
-        now = time.time()
+        now  = time.time()
         dist = math.hypot(self.pose_x - self.last_pos[0], self.pose_y - self.last_pos[1])
         if dist > 0.10:
             self.last_pos = (self.pose_x, self.pose_y)
@@ -157,19 +167,22 @@ class NavControllerNode(Node):
             self._transition(State.RECOVERY)
             return
 
-        # Check for ArUco logic
-        if self.latest_aruco:
-            d = float(self.latest_aruco.distance)
-            mid = self.latest_aruco.marker_id
-            if mid <= 4 and d <= ACTION_DISTANCE_THRESHOLD:
-                # Phase 4 Rule 3: Publish zero immediately on entering APPROACH_TAG
-                self._publish_vel(0.0, 0.0)
-                self._transition(State.APPROACH_TAG)
-                return
-
         # General Exploration behavior
         speed_factor = min(1.0, self.lidar.forward_dist / SLOWDOWN_DIST)
         v_cmd = max(V_MIN, V_MAX * speed_factor)
+
+        # [FIX 6 Correction] Check ArUco for smooth deceleration
+        if self.latest_aruco:
+            d   = float(self.latest_aruco.distance)
+            mid = self.latest_aruco.marker_id
+            if mid <= 4:
+                if d <= ACTION_DISTANCE_THRESHOLD:
+                    # Phase 4 Rule 3: Publish zero immediately on entering APPROACH_TAG
+                    self._publish_vel(0.0, 0.0)
+                    self._transition(State.APPROACH_TAG)
+                    return
+                elif d <= APPROACH_TRIGGER_DIST:
+                    v_cmd = V_MIN
 
         if self.lidar.forward_dist < 2.0:
             is_l_left  = self.lidar.left_dist > 1.5 and self.lidar.right_dist < 1.2
@@ -201,8 +214,8 @@ class NavControllerNode(Node):
 
     def _move(self, v: float, w: float):
         if v > 0.05 and self.lidar.left_dist < 2.0 and self.lidar.right_dist < 2.0:
-            diff = self.lidar.right_dist - self.lidar.left_dist
-            w += diff * 0.4
+            diff  = self.lidar.right_dist - self.lidar.left_dist
+            w    += diff * 0.4
         REPULSION_DIST = 0.30
         if self.lidar.left_dist  < REPULSION_DIST: w -= 0.55
         if self.lidar.right_dist < REPULSION_DIST: w += 0.55
@@ -213,9 +226,8 @@ class NavControllerNode(Node):
 
     def _handle_approach_tag(self):
         elapsed = time.time() - self.state_start_time
-        
-        # Phase 4 Rule 3: Zero velocity already published on transition, 
-        # ensure it stays blocked during stabilization window
+
+        # Phase 4 Rule 3: Keep robot stopped during entire stabilization window
         self._publish_vel(0.0, 0.0)
 
         if elapsed < 1.5:
@@ -226,22 +238,31 @@ class NavControllerNode(Node):
             return
 
         mid = self.latest_aruco.marker_id
-        d = float(self.latest_aruco.distance)
+        d   = float(self.latest_aruco.distance)
+
+        # [FIX 5] Clear latest_aruco after consuming so stale data is never re-processed
+        self.latest_aruco = None
+
+        # Only act if marker is within execution distance
+        if d > ACTION_DISTANCE_THRESHOLD:
+            self.get_logger().info(f'[ARUCO] ID {mid} detected at {d:.2f}m — too far. Resuming approach.')
+            self._transition(State.EXPLORE)
+            return
 
         # Phase 4 Rule 4: Re-detection guard ONLY if distance <= threshold
         if mid in self.logged_tags:
             if d <= ACTION_DISTANCE_THRESHOLD:
-                self.get_logger().info(f"[ARUCO] ID {mid} already logged! Forcing 180 U-Turn!")
+                self.get_logger().info(f'[ARUCO] ID {mid} already logged! Forcing 180 U-Turn!')
                 self.uturn_post_state = State.EXPLORE
                 self._transition(State.UTURN)
             else:
-                self.get_logger().info(f"[ARUCO] ID {mid} already logged but far ({d:.2f}m). Ignoring.")
+                self.get_logger().info(f'[ARUCO] ID {mid} already logged but far ({d:.2f}m). Ignoring.')
                 self._transition(State.EXPLORE)
             return
 
-        # New Tag, log it
+        # New tag — log and dispatch
         self.logged_tags.add(mid)
-        self.get_logger().info(f"[ARUCO] Logged new ID {mid} at {d:.2f}m executing action!")
+        self.get_logger().info(f'[ARUCO] Logged new ID {mid} at {d:.2f}m — executing action!')
 
         # ID Dispatch Rules
         if mid == 0:
@@ -269,15 +290,13 @@ class NavControllerNode(Node):
             self._transition(State.RECOVERY)
             return
 
-        # Phase 4 Rule 2: Non-blocking turn execution based on time elapsed
-        # Turn lasts 4.0 seconds
+        # Phase 4 Rule 2: Non-blocking turn execution (4.0 seconds)
         if elapsed < 4.0:
             if self.active_turn_cmd == "LEFT":
                 self._publish_vel(0.0, +W_SIGN_TURN)
             elif self.active_turn_cmd == "RIGHT":
                 self._publish_vel(0.0, -W_SIGN_TURN)
             else:
-                # Should not happen, but fallback just in case
                 self._transition(State.EXPLORE)
         else:
             self._publish_vel(0.0, 0.0)
@@ -285,48 +304,79 @@ class NavControllerNode(Node):
 
     def _handle_follow_green(self):
         elapsed = time.time() - self.state_start_time
-        # Simplified placeholder for Follow Green logic
-        if self.latest_aruco and self.latest_aruco.distance <= ACTION_DISTANCE_THRESHOLD and self.latest_aruco.marker_id not in self.logged_tags:
+
+        # Check for next ArUco tag
+        if (self.latest_aruco and
+                float(self.latest_aruco.distance) <= ACTION_DISTANCE_THRESHOLD and
+                self.latest_aruco.marker_id not in self.logged_tags):
             self._publish_vel(0.0, 0.0)
             self._transition(State.APPROACH_TAG)
             return
-            
+
+        # [FIX 1] FOLLOW states use gap navigation directly, NOT _handle_explore()
+        # This avoids firing the EXPLORE stuck watchdog while in a FOLLOW state
         if elapsed > 120.0:
             self.get_logger().warn("FOLLOW_GREEN timeout! Falling back to EXPLORE.")
             self._transition(State.EXPLORE)
             return
-            
-        self._handle_explore()
+
+        if not self.lidar:
+            return
+        target_angle, _ = self._select_best_gap()
+        if target_angle is not None:
+            self._move(V_MIN, target_angle)
+        else:
+            self._publish_vel(V_MIN, W_SCAN)
 
     def _handle_follow_blue(self):
         elapsed = time.time() - self.state_start_time
-        # Simplified placeholder for Follow Blue logic
-        if self.latest_aruco and self.latest_aruco.distance <= ACTION_DISTANCE_THRESHOLD and self.latest_aruco.marker_id not in self.logged_tags:
+
+        # Check for next ArUco tag
+        if (self.latest_aruco and
+                float(self.latest_aruco.distance) <= ACTION_DISTANCE_THRESHOLD and
+                self.latest_aruco.marker_id not in self.logged_tags):
             self._publish_vel(0.0, 0.0)
             self._transition(State.APPROACH_TAG)
             return
-            
+
+        # [FIX 1] FOLLOW states use gap navigation directly, NOT _handle_explore()
         if elapsed > 120.0:
             self.get_logger().warn("FOLLOW_BLUE timeout! Falling back to EXPLORE.")
             self._transition(State.EXPLORE)
             return
-            
-        self._handle_explore()
+
+        if not self.lidar:
+            return
+        target_angle, _ = self._select_best_gap()
+        if target_angle is not None:
+            self._move(V_MIN, target_angle)
+        else:
+            self._publish_vel(V_MIN, W_SCAN)
 
     def _handle_follow_orange(self):
         elapsed = time.time() - self.state_start_time
-        # Simplified placeholder for Follow Orange logic
-        if self.latest_aruco and self.latest_aruco.distance <= ACTION_DISTANCE_THRESHOLD and self.latest_aruco.marker_id not in self.logged_tags:
+
+        # Check for next ArUco tag
+        if (self.latest_aruco and
+                float(self.latest_aruco.distance) <= ACTION_DISTANCE_THRESHOLD and
+                self.latest_aruco.marker_id not in self.logged_tags):
             self._publish_vel(0.0, 0.0)
             self._transition(State.APPROACH_TAG)
             return
-            
+
+        # [FIX 1] FOLLOW states use gap navigation directly, NOT _handle_explore()
         if elapsed > 120.0:
             self.get_logger().warn("FOLLOW_ORANGE timeout! Falling back to EXPLORE.")
             self._transition(State.EXPLORE)
             return
-            
-        self._handle_explore()
+
+        if not self.lidar:
+            return
+        target_angle, _ = self._select_best_gap()
+        if target_angle is not None:
+            self._move(V_MIN, target_angle)
+        else:
+            self._publish_vel(V_MIN, W_SCAN)
 
     def _handle_uturn(self):
         elapsed = time.time() - self.state_start_time
@@ -338,43 +388,44 @@ class NavControllerNode(Node):
             self._transition(State.RECOVERY)
             return
 
-        # Execute pure Uturn purely on time (8.0 seconds total delay for 180deg approximate pivot)
-        if elapsed < 8.0:
+        # [FIX 4] W_SIGN_SPIN=0.40 rad/s × ~7.85s = pi rad = true 180deg
+        if elapsed < 7.9:
             self._publish_vel(0.0, +W_SIGN_SPIN)
         else:
             self._publish_vel(0.0, 0.0)
+            self.indicator_blue_arrow = False
             self._transition(self.uturn_post_state)
 
     def _handle_recovery(self):
         elapsed = time.time() - self.state_start_time
 
         if elapsed < 1.0:
-            # 1s reverse
-            self._publish_vel(-0.20, 0.0)
+            self._publish_vel(-0.20, 0.0)    # 1s reverse
         elif elapsed < 3.0:
-            # 2s rotate / scan (w=0.4)
-            self._publish_vel(0.0, 0.4)
+            self._publish_vel(0.0, 0.4)      # 2s rotate / scan
         else:
             self._publish_vel(0.0, 0.0)
             self.get_logger().info("Recovery complete, returning to EXPLORE")
             self._transition(State.EXPLORE)
 
     def _handle_halt(self):
-        # Stop the robot completely
+        # Stop the robot completely every tick
         self._publish_vel(0.0, 0.0)
-        
-        # Log exactly once
-        if not hasattr(self, 'has_halted'):
+
+        # [FIX 2] Use self.has_halted flag (set in __init__) instead of hasattr()
+        # Prevents SystemExit from being raised repeatedly at 10Hz
+        if not self.has_halted:
             self.has_halted = True
-            
+
             with open('/tmp/mahe_nav_mission_log.txt', 'w') as f:
                 f.write("MISSION COMPLETE\n")
                 f.write(f"Logged Tags: {self.logged_tags}\n")
                 f.write(f"Final Position: ({self.pose_x:.2f}, {self.pose_y:.2f})\n")
-                
+
             self.get_logger().info("━━━ MISSION COMPLETE: Logs written. Node Halt. ━━━")
-            # Shutdown clean
-            raise SystemExit
+            self.destroy_node()
+            rclpy.try_shutdown()
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -388,6 +439,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.try_shutdown()
+
 
 if __name__ == '__main__':
     main()
