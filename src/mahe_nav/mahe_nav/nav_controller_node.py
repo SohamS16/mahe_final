@@ -11,7 +11,7 @@ from sensor_msgs.msg import LaserScan
 from mahe_nav_interfaces.msg import ArucoDetection, SignDetection, LidarAnalysis
 
 # --- FIXED: [BUG 2] ---
-ACTION_DISTANCE_THRESHOLD = 0.8
+ACTION_DISTANCE_THRESHOLD = 1.25
 
 
 class State(Enum):
