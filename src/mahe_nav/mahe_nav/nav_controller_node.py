@@ -100,9 +100,7 @@ class NavControllerNode(Node):
         self.sign      = None
         self.aruco_seen = set()
 
-        # --- FIXED: STEP 2 - DETECTION ORDER / SEQUENCE TRACKER ---
-        self.expected_marker_index = 0
-        self.marker_sequence = [1, 0, 2, 3, 4]
+        # --- FIXED: STEP 1 - REMOVE SEQUENCE TRACKING ENTIRELY ---
         
         self.latest_scan = None # For BUG 4
 
@@ -221,23 +219,13 @@ class NavControllerNode(Node):
         cmd_name = cmd_map.get(mid, "Unknown")
         status_str = "Unknown"
 
-        # --- FIXED: STEP 2 - DETECTION ORDER / SEQUENCE TRACKER ---
-        is_expected = False
-        if self.expected_marker_index < len(self.marker_sequence):
-            if mid == self.marker_sequence[self.expected_marker_index]:
-                is_expected = True
-
-        if not is_expected:
-            status_str = "Ignored - Not in sequence"
-            self.get_logger().info(f"[ARUCO {mid}] Detected but not expected yet. Ignoring.")
+        # --- FIXED: STEP 2 - SIMPLE EXECUTION LOGIC ---
+        if d > ACTION_DISTANCE_THRESHOLD:
+            status_str = "Approaching"
+            self.get_logger().info(f"[ARUCO {mid}] Detected at {d:.2f}m - Too far, approaching...")
         else:
-            # --- FIXED: STEP 3 - DISTANCE GATE ---
-            if d > ACTION_DISTANCE_THRESHOLD:
-                status_str = "Approaching"
-                self.get_logger().info(f"[ARUCO {mid}] Detected at {d:.2f}m - Too far, approaching...")
-            else:
-                status_str = "Executing"
-                self.get_logger().info(f"[ARUCO {mid}] In range at {d:.2f}m - Executing: {cmd_name}")
+            status_str = "Executing"
+            self.get_logger().info(f"[ARUCO {mid}] In range at {d:.2f}m - Executing: {cmd_name}")
 
         # --- FIXED: STEP 4 - VERBOSE PRINT ON DETECTION ---
         verbose_msg = (
@@ -300,13 +288,8 @@ class NavControllerNode(Node):
                 self._transition(State.FOLLOW_ORANGE)
                 action_executed = True
 
-        # Advance sequence upon successful queueing/transition
-        if action_executed:
-            self.expected_marker_index += 1
-            if self.expected_marker_index < len(self.marker_sequence):
-                self.get_logger().info(f"SEQUENCE ADVANCED: Next ArUco ID {self.marker_sequence[self.expected_marker_index]}")
-            else:
-                self.get_logger().info("SEQUENCE COMPLETE")
+        # --- FIXED: STEP 1 - REMOVE SEQUENCE TRACKING ENTIRELY ---
+        # Sequence tracking removed as requested.
 
     # ── Sign Action ──────────────────────────────────────────────────────────
 
