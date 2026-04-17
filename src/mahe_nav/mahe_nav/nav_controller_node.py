@@ -11,7 +11,7 @@ from sensor_msgs.msg import LaserScan
 from mahe_nav_interfaces.msg import ArucoDetection, SignDetection, LidarAnalysis
 
 # --- FIXED: [BUG 2] ---
-ACTION_DISTANCE_THRESHOLD = 1.25
+ACTION_DISTANCE_THRESHOLD = 0.8
 
 
 class State(Enum):
@@ -102,7 +102,7 @@ class NavControllerNode(Node):
 
         # --- FIXED: STEP 2 - REMOVE ALL SEQUENCE/PRECEDENCE LOGIC ---
         
-        self.latest_scan = None # For BUG 4
+        # --- REMOVED: LIDAR CHECK ---
 
         self.PASSABLE_THR = 0.525
 
@@ -138,8 +138,7 @@ class NavControllerNode(Node):
         self.create_subscription(LidarAnalysis,  '/lidar/analysis',   self._lidar_cb, best_effort)
         self.create_subscription(SignDetection,  '/sign_detection',   self._sign_cb,  best_effort)
         self.create_subscription(ArucoDetection, '/aruco/detections', self._aruco_cb, best_effort)
-        # --- FIXED: [BUG 4] ---
-        self.create_subscription(LaserScan,      '/scan',             self._scan_cb,  best_effort)
+        # --- REMOVED: LIDAR CHECK ---
 
         self.create_timer(0.05, self._control_loop)
         self.get_logger().info('NavController: Sign-Aware Differential-Drive Version Active')
@@ -154,9 +153,7 @@ class NavControllerNode(Node):
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
-    def _scan_cb(self, msg):
-        # --- FIXED: [BUG 4] ---
-        self.latest_scan = msg
+    # --- REMOVED: LIDAR CHECK ---
 
     def _lidar_cb(self, msg):
         self.lidar = msg
@@ -261,34 +258,7 @@ class NavControllerNode(Node):
         if status_str == "Executing":
             self.execute_marker_command(mid)
 
-    def check_lidar_clearance(self, direction, scan_msg):
-        # --- FIXED: LIDAR TOLERANCE ---
-        if scan_msg is None:
-            return False
-        ranges = scan_msg.ranges
-        n = len(ranges)
-        
-        if direction == 'LEFT':
-            cone = ranges[int(n*0.125):int(n*0.375)]
-        elif direction == 'RIGHT':
-            cone = ranges[int(n*0.625):int(n*0.875)]
-        elif direction == 'U_TURN':
-            cone = ranges[int(n*0.375):int(n*0.625)]
-        else:
-            return False
-            
-        clean_cone = [r for r in cone if not math.isinf(r) and not math.isnan(r)]
-        if not clean_cone:
-            return False
-            
-        max_range = max(clean_cone)
-        threshold = 0.3
-        is_clear = max_range > threshold
-        
-        result_str = "CLEAR" if is_clear else "BLOCKED"
-        self.get_logger().info(f"[LIDAR CHECK] Direction: {direction} | Max range in arc: {max_range:.2f}m | Threshold: {threshold}m | Result: {result_str}")
-        
-        return is_clear
+    # --- REMOVED: LIDAR CHECK ---
 
     def execute_marker_command(self, marker_id: int):
         """Routes ArUco marker ID."""
@@ -296,27 +266,18 @@ class NavControllerNode(Node):
         match marker_id:
             case 0:
                 # --- FIXED: STEP 1 - FIX ID TO COMMAND MAPPING ---
-                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
-                if self.check_lidar_clearance('RIGHT', self.latest_scan):
-                    action_executed = self._queue_sign_action("RIGHT")
-                else:
-                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on RIGHT. Holding position.")
+                # --- REMOVED: LIDAR CHECK ---
+                action_executed = self._queue_sign_action("RIGHT")
             case 1:
                 # --- FIXED: STEP 1 - FIX ID TO COMMAND MAPPING ---
-                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
-                if self.check_lidar_clearance('LEFT', self.latest_scan):
-                    action_executed = self._queue_sign_action("LEFT")
-                else:
-                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on LEFT. Holding position.")
+                # --- REMOVED: LIDAR CHECK ---
+                action_executed = self._queue_sign_action("LEFT")
             case 2:
                 self._transition(State.FOLLOW_GREEN)
                 action_executed = True
             case 3:
-                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
-                if self.check_lidar_clearance('U_TURN', self.latest_scan):
-                    action_executed = self._queue_sign_action("INPLACE_ROTATION")
-                else:
-                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on U_TURN. Holding position.")
+                # --- REMOVED: LIDAR CHECK ---
+                action_executed = self._queue_sign_action("INPLACE_ROTATION")
             case 4:
                 self._transition(State.FOLLOW_ORANGE)
                 action_executed = True
