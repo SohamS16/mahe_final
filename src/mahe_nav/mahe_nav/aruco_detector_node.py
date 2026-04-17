@@ -13,7 +13,7 @@ from geometry_msgs.msg import Point
 from mahe_nav_interfaces.msg import ArucoDetection
 
 # Dictionary and Marker Specs
-ARUCO_DICT_ID = cv2.aruco.DICT_4X4_50
+ARUCO_DICT_ID = cv2.aruco.DICT_APRILTAG_36h11
 MARKER_SIZE_M = 0.150  
 
 class ArucoDetectorNode(Node):

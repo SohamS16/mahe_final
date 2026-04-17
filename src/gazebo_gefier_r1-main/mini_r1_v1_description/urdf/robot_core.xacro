@@ -18,6 +18,13 @@
         </visual>
     </xacro:property>
 
+    <link name="base_footprint"/>
+    <joint name="base_footprint_joint" type="fixed">
+        <parent link="base_footprint"/>
+        <child link="base_link"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
     <link name="base_link">
         <inertial>
             <origin xyz="-0.00145187820034053 -2.01021238721632E-15 0.0495004152298996" rpy="0 0 0" />

@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, AppendEnvironmentVariable
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -38,10 +38,10 @@ def generate_launch_description():
         arguments=[
             "-topic", 'robot_description',
             '-name', 'mini_r1',
-            '-x', '0.0',
-            '-y', '0.0',
+            '-x', '-1.350',
+            '-y', '1.800',
             '-z', '0.07',
-            '-Y', '3.14159'
+            '-Y', '0.0'
         ],
         output="screen"
     )
@@ -77,6 +77,12 @@ def generate_launch_description():
 
     return LaunchDescription([ 
         *launch_args,
+        AppendEnvironmentVariable(
+            'GZ_SIM_RESOURCE_PATH',
+            os.path.join(description_package_share, '..')),
+        AppendEnvironmentVariable(
+            'IGN_GAZEBO_RESOURCE_PATH',
+            os.path.join(description_package_share, '..')),
         rsp,
         stamper,
         gz,

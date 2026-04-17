@@ -22,7 +22,7 @@ install( DIRECTORY meshes
 install( DIRECTORY worlds
   DESTINATION share/${PROJECT_NAME})
 install(
-  DIRECTORY config launch meshes urdf
+  DIRECTORY config launch meshes urdf materials
   DESTINATION share/${PROJECT_NAME}
 )
   

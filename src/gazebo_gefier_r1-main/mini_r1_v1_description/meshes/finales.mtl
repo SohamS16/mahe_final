@@ -1,5 +1,27 @@
-# Blender 5.1.0 MTL File: 'finales.blend'
+# Blender 5.1.0 MTL File: 'qwerty.blend'
 # www.blender.org
+
+newmtl Material.001
+Ns 250.000000
+Ka 1.000000 1.000000 1.000000
+Kd 0.800000 0.800000 0.800000
+Ks 0.500000 0.500000 0.500000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+
+newmtl Material.002
+Ns 250.000000
+Ka 1.000000 1.000000 1.000000
+Kd 1.000000 1.000000 1.000000
+Ks 0.500000 0.500000 0.500000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd right.png
+
 newmtl Steel_-_Satin
 Ns 0.000000
 Ka 1.000000 1.000000 1.000000
@@ -21,7 +43,7 @@ d 1.000000
 illum 2
 map_Kd aruco_0_final.png
 
-newmtl aruco1
+newmtl aruco_1
 Ns 250.000000
 Ka 1.000000 1.000000 1.000000
 Kd 1.000000 1.000000 1.000000
@@ -32,7 +54,7 @@ d 1.000000
 illum 2
 map_Kd aruco_1_final.png
 
-newmtl aruco2
+newmtl aruco_2
 Ns 250.000000
 Ka 1.000000 1.000000 1.000000
 Kd 1.000000 1.000000 1.000000
@@ -43,7 +65,7 @@ d 1.000000
 illum 2
 map_Kd aruco_2_final.png
 
-newmtl aruco3
+newmtl aruco_3
 Ns 250.000000
 Ka 1.000000 1.000000 1.000000
 Kd 1.000000 1.000000 1.000000
@@ -86,17 +108,6 @@ Ni 1.500000
 d 1.000000
 illum 2
 map_Kd left.png
-
-newmtl right
-Ns 250.000000
-Ka 1.000000 1.000000 1.000000
-Kd 1.000000 1.000000 1.000000
-Ks 0.500000 0.500000 0.500000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-map_Kd right.png
 
 newmtl rotate
 Ns 250.000000
