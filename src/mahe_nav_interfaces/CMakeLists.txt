@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArucoDetection.msg"
   "msg/SignDetection.msg"
   "msg/LidarAnalysis.msg"
+  "msg/FloorMarkerDetection.msg"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

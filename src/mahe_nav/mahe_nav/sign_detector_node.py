@@ -1,209 +1,371 @@
-import os
+"""
+MAHE UGV Navigation: Sign Detector Node (Phase 2 CV Floor Marker Tracking)
+==========================================================================
+Replaces the old sign detector logic with the validated computer vision pipeline
+from cv_follower_node_corrected.py. Completely rewritten to process FloorMarkerDetection.
+"""
+
 import math
+import time
+from collections import deque, Counter
 import numpy as np
 import cv2
+from cv_bridge import CvBridge
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
-from mahe_nav_interfaces.msg import SignDetection
+from nav_msgs.msg import Odometry
 
-MATCH_THRESHOLD       = 0.75
-SIGN_PHYSICAL_WIDTH_M = 0.250
-FOCAL_LENGTH_PX       = 534.7
+from mahe_nav_interfaces.msg import ArucoDetection, FloorMarkerDetection
 
-# OpenCV colours (BGR)
-CLR_CONTOUR = (0, 255,   0)   # green  — every 4-corner contour
-CLR_BEST    = (0,   0, 255)   # red    — best matched sign bounding box
-CLR_LABEL   = (0, 255, 255)   # yellow — overlay text
+# === PHASE 2 CV: CONSTANTS ===
+ROI_TOP_FRACTION    = 0.40
+ROI_BOTTOM_FRACTION = 1.00
 
+BLUE_GATE_LOGO      = 3000
+BLUE_GATE_APPROACH  = 5000
 
+HSV_GREEN_LO  = np.array([45,  80,  80],  dtype=np.uint8)
+HSV_GREEN_HI  = np.array([85,  255, 255], dtype=np.uint8)
+HSV_ORANGE_LO = np.array([5,   120, 120], dtype=np.uint8)
+HSV_ORANGE_HI = np.array([20,  255, 255], dtype=np.uint8)
+HSV_BLUE_LO   = np.array([100, 80,  80],  dtype=np.uint8)
+HSV_BLUE_HI   = np.array([140, 255, 255], dtype=np.uint8)
+
+MORPH_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+MIN_PETAL_AREA   = 200
+MIN_PETAL_VECTOR = 15.0
+MAX_PETAL_VECTOR = 120.0
+
+MAX_ANGULAR_VEL  = 0.05
+
+# === PHASE 2 CV: Red Tile HALT Detection ===
+RED_HSV_LOWER = np.array([0,   120, 120])
+RED_HSV_UPPER = np.array([10,  255, 255])
+RED_HSV_LOWER2 = np.array([170, 120, 120])
+RED_HSV_UPPER2 = np.array([180, 255, 255])
+
+VOTE_WINDOW      = 7
+VOTE_THRESHOLD   = 5
+VOTE_TIMEOUT_SEC = 3.0
+
+TAG_ID_GREEN  = 1
+TAG_ID_BLUE   = 3
+TAG_ID_ORANGE = 2
+TAG_DIST_GATE = 1.25
+
+DIRECTION_BINS = [
+    ((-22.5,   22.5),  "RIGHT"),
+    (( 22.5,   67.5),  "FORWARD_RIGHT"),
+    (( 67.5,  112.5),  "FORWARD"),
+    ((112.5,  157.5),  "FORWARD_LEFT"),
+    ((157.5,  180.1),  "LEFT"),
+    ((-180.1, -157.5), "LEFT"),
+    ((-157.5, -112.5), "BACKWARD_LEFT"),
+    ((-112.5,  -67.5), "BACKWARD"),
+    (( -67.5,  -22.5), "BACKWARD_RIGHT"),
+]
+
+COLLAPSE_TO_4 = {
+    "FORWARD":        "FORWARD",
+    "FORWARD_RIGHT":  "FORWARD",
+    "FORWARD_LEFT":   "FORWARD",
+    "RIGHT":          "RIGHT",
+    "BACKWARD_RIGHT": "BACKWARD",
+    "BACKWARD":       "BACKWARD",
+    "BACKWARD_LEFT":  "BACKWARD",
+    "LEFT":           "LEFT",
+}
+
+# === PHASE 2 CV: UTILITY FUNCTIONS ===
+def normalise_angle(a: float) -> float:
+    a = a % 360.0
+    if a > 180.0:
+        a -= 360.0
+    return a
+
+def angle_to_direction_8(angle_deg: float) -> str:
+    a = normalise_angle(angle_deg)
+    for (lo, hi), label in DIRECTION_BINS:
+        if lo <= a < hi:
+            return label
+    return "UNKNOWN"
+
+def angle_to_direction_4(angle_deg: float) -> str:
+    return COLLAPSE_TO_4.get(angle_to_direction_8(angle_deg), "UNKNOWN")
+
+# === PHASE 2 CV: CLASS DEFINITION ===
 class SignDetectorNode(Node):
+
     def __init__(self):
         super().__init__('sign_detector')
 
-        self.declare_parameter(
-            'templates_dir',
-            '/home/yusuf/ros2_mahe_ugv/src/gazebo_gefier_r1-main/'
-            'mini_r1_v1_description/meshes')
-        self.declare_parameter('enable_viz', True)
+        self.cv_mode = "GREEN"
+        self.pose_yaw = 0.0
+        self.angular_vel = 0.0
+        self.tile_count = 0
+        self.vote_buffer = deque(maxlen=VOTE_WINDOW)
+        self.vote_start_time = None
+        self.bridge = CvBridge()
 
-        templates_dir   = self.get_parameter('templates_dir').value
-        self.enable_viz = self.get_parameter('enable_viz').value
+        self.pub_floor = self.create_publisher(
+            FloorMarkerDetection, '/floor_marker/detection', 10)
 
-        self.bridge    = CvBridge()
-        self.templates = {}
-        self._load_templates(templates_dir)
+        sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=1)
 
-        self.detection_history = []
-        self.CONSENSUS_FRAMES  = 5
-
-        sensor_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.pub = self.create_publisher(SignDetection, '/sign_detection', 10)
-        self.sub = self.create_subscription(
+        self.create_subscription(
             Image, '/r1_mini/camera/image_raw', self._image_cb, sensor_qos)
+        self.create_subscription(
+            Odometry, '/odom_fused', self._odom_cb, sensor_qos)
+        self.create_subscription(
+            ArucoDetection, '/aruco/detections', self._aruco_cb, sensor_qos)
 
-        # Attempt to open visualisation windows
-        if self.enable_viz:
-            try:
-                cv2.namedWindow('Camera + Detection', cv2.WINDOW_NORMAL)
-                cv2.namedWindow('Mask / Threshold',   cv2.WINDOW_NORMAL)
-                cv2.resizeWindow('Camera + Detection', 640, 480)
-                cv2.resizeWindow('Mask / Threshold',   640, 480)
-                self.get_logger().info('Sign Detector: Visualisation windows open')
-            except Exception as exc:
-                self.get_logger().warn(
-                    f'Sign Detector: Cannot open viz windows ({exc}) — disabling')
-                self.enable_viz = False
+        self.get_logger().info("Sign Detector (CV Floor Marker Mode) Active")
 
-        self.get_logger().info(
-            f'Sign Detector Active — Templates: {len(self.templates)} | '
-            f'viz={self.enable_viz}')
+    def _odom_cb(self, msg: Odometry):
+        q = msg.pose.pose.orientation
+        self.pose_yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.angular_vel = abs(msg.twist.twist.angular.z)
 
-    # ── Template Loading ──────────────────────────────────────────────────────
+    def _aruco_cb(self, msg: ArucoDetection):
+        if msg.distance <= TAG_DIST_GATE:
+            # Check for tag 3 and distance <= ARUCO_SWITCH_DIST and cv_mode == "GREEN" 
+            # Note: the user wrote TAG_ID_BLUE (which is 3) rather than raw number sometimes, we will use id
+            if msg.marker_id == 3 and self.cv_mode == "GREEN":
+                self.cv_mode = "BLUE"
+                self.vote_buffer.clear()
+                self.vote_start_time = None
+                self.get_logger().info("CV mode switched to BLUE")
+            elif msg.marker_id == 2 and self.cv_mode == "BLUE":
+                self.cv_mode = "ORANGE"
+                self.vote_buffer.clear()
+                self.vote_start_time = None
+                self.get_logger().info("CV mode switched to ORANGE")
 
-    def _load_templates(self, directory: str):
-        files = {
-            'FORWARD':          'forckward.png',
-            'LEFT':             'left.png',
-            'RIGHT':            'right.png',
-            'STOP':             'stop.png',
-            'INPLACE_ROTATION': 'rotate.png',
-            'GOAL':             'goal.png',
-        }
-        for name, fname in files.items():
-            path = os.path.join(directory, fname)
-            if os.path.exists(path):
-                img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-                img = cv2.resize(img, (64, 64))
-                self.templates[name] = cv2.createCLAHE(clipLimit=2.0).apply(img)
-            else:
-                self.get_logger().warn(f'Template missing: {path}')
-
-    # ── Image Callback ────────────────────────────────────────────────────────
-
-    def _image_cb(self, msg):
+    def _image_cb(self, msg: Image):
         try:
-            cv_img = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        except Exception:
+            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            self._pipeline(bgr, msg.header)
+        except Exception as e:
+            self.get_logger().warn(f"cv_bridge error: {e}")
+
+    # === PHASE 2 CV: PIPELINE ===
+    def _pipeline(self, bgr, header):
+        if self.angular_vel > MAX_ANGULAR_VEL:
             return
 
-        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        h, w = bgr.shape[:2]
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
-        # Binary threshold — isolates bright sign panels
-        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        roi_top = int(h * ROI_TOP_FRACTION)
+        roi_hsv = hsv[roi_top:h, 0:w]
 
-        contours, _ = cv2.findContours(
-            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # === PHASE 2 CV: Red Tile HALT Detection ===
+        # Run independently of cv_mode — checks for massive red floor region
+        red_mask  = cv2.inRange(roi_hsv, RED_HSV_LOWER,  RED_HSV_UPPER)
+        red_mask2 = cv2.inRange(roi_hsv, RED_HSV_LOWER2, RED_HSV_UPPER2)
+        red_mask  = cv2.bitwise_or(red_mask, red_mask2)
+        red_px    = int(np.count_nonzero(red_mask))
 
-        # Visualisation frame (copy only when needed)
-        viz_frame = cv_img.copy() if self.enable_viz else None
+        if red_px > 8000:
+            halt_msg = FloorMarkerDetection()
+            halt_msg.header.stamp = self.get_clock().now().to_msg()
+            halt_msg.colour    = "RED"
+            halt_msg.direction = "HALT"
+            halt_msg.confidence = 1.0
+            halt_msg.blue_px   = 0
+            halt_msg.petal_px  = red_px
+            self.pub_floor.publish(halt_msg)
+            self.get_logger().info(f'[CV] RED TILE DETECTED — red_px={red_px} — publishing HALT')
+            return   # skip rest of pipeline this frame
 
-        best_sign  = 'NONE'
-        best_score = 0.0
-        best_w     = 0.0
-        best_cx    = best_cy = 0.0
-        best_box   = None          # (x, y, w, h) for the top match
+        blue_mask = cv2.inRange(roi_hsv, HSV_BLUE_LO, HSV_BLUE_HI)
+        blue_px   = int(cv2.countNonZero(blue_mask))
 
-        for cnt in contours:
-            if cv2.contourArea(cnt) < 400:
+        if blue_px < BLUE_GATE_LOGO:
+            return
+
+        blue_contours, _ = cv2.findContours(
+            blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not blue_contours:
+            return
+
+        largest_blue = max(blue_contours, key=cv2.contourArea)
+        bm = cv2.moments(largest_blue)
+        if bm["m00"] == 0:
+            return
+
+        logo_cx = bm["m10"] / bm["m00"]
+        logo_cy = bm["m01"] / bm["m00"]
+
+        active_colour = self.cv_mode
+
+        if active_colour == "GREEN":
+            colour_lo, colour_hi = HSV_GREEN_LO,  HSV_GREEN_HI
+        elif active_colour == "ORANGE":
+            colour_lo, colour_hi = HSV_ORANGE_LO, HSV_ORANGE_HI
+        elif active_colour == "BLUE":
+            colour_lo, colour_hi = HSV_BLUE_LO,   HSV_BLUE_HI
+        else:
+            return
+
+        colour_mask = cv2.inRange(roi_hsv, colour_lo, colour_hi)
+
+        if active_colour == "BLUE":
+            colour_mask = self._mask_inner_logo(colour_mask, largest_blue, inner_fraction=0.45)
+
+        colour_mask = cv2.morphologyEx(colour_mask, cv2.MORPH_OPEN, MORPH_KERNEL)
+
+        petal_px = int(cv2.countNonZero(colour_mask))
+        if petal_px < MIN_PETAL_AREA:
+            return
+
+        petal_contours, _ = cv2.findContours(
+            colour_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+        if not petal_contours:
+            return
+
+        if active_colour == "BLUE":
+            petal_contours = self._filter_elongated(petal_contours, min_ar=1.5)
+            if not petal_contours:
+                return
+
+        largest_petal = max(petal_contours, key=cv2.contourArea)
+        pm = cv2.moments(largest_petal)
+        if pm["m00"] == 0:
+            return
+
+        petal_cx = pm["m10"] / pm["m00"]
+        petal_cy = pm["m01"] / pm["m00"]
+
+        dx = petal_cx - logo_cx
+        dy = petal_cy - logo_cy
+
+        vector_mag = math.sqrt(dx * dx + dy * dy)
+        if not (MIN_PETAL_VECTOR <= vector_mag <= MAX_PETAL_VECTOR):
+            return
+
+        raw_angle_rad = math.atan2(-dy, dx)
+        raw_angle_deg = math.degrees(raw_angle_rad)
+
+        robot_yaw_deg   = math.degrees(self.pose_yaw)
+        world_angle_deg = normalise_angle(raw_angle_deg + robot_yaw_deg)
+
+        direction_4 = angle_to_direction_4(world_angle_deg)
+        if direction_4 == "UNKNOWN":
+            return
+
+        now = time.time()
+
+        if self.vote_start_time is None:
+            self.vote_start_time = now
+
+        self.vote_buffer.append(direction_4)
+
+        vote_counts = Counter(self.vote_buffer)
+        top_dir, top_count = vote_counts.most_common(1)[0]
+
+        if top_count >= VOTE_THRESHOLD:
+            self.tile_count += 1
+            confidence = top_count / VOTE_WINDOW
+            self._emit(
+                direction   = top_dir,
+                colour      = active_colour,
+                confidence  = confidence,
+                petal_cx    = petal_cx,
+                petal_cy    = petal_cy,
+                logo_cx     = logo_cx,
+                logo_cy     = logo_cy,
+                raw_angle   = raw_angle_deg,
+                world_angle = world_angle_deg,
+                blue_px     = blue_px,
+                petal_px    = petal_px,
+                header      = header
+            )
+            return
+
+        elapsed = now - self.vote_start_time
+        if elapsed >= VOTE_TIMEOUT_SEC:
+            self._emit(
+                direction   = "TIMEOUT",
+                colour      = active_colour,
+                confidence  = top_count / VOTE_WINDOW,
+                petal_cx    = petal_cx,
+                petal_cy    = petal_cy,
+                logo_cx     = logo_cx,
+                logo_cy     = logo_cy,
+                raw_angle   = raw_angle_deg,
+                world_angle = world_angle_deg,
+                blue_px     = blue_px,
+                petal_px    = petal_px,
+                header      = header
+            )
+
+    # === PHASE 2 CV: HELPERS ===
+    def _emit(self, direction, colour, confidence, petal_cx, petal_cy, logo_cx, logo_cy, raw_angle, world_angle, blue_px, petal_px, header):
+        msg = FloorMarkerDetection()
+        msg.header          = header
+        msg.colour          = colour
+        msg.direction       = direction
+        msg.confidence      = float(confidence)
+        msg.tile_count      = int(self.tile_count)
+        msg.petal_cx        = float(petal_cx)
+        msg.petal_cy        = float(petal_cy)
+        msg.logo_cx         = float(logo_cx)
+        msg.logo_cy         = float(logo_cy)
+        msg.raw_angle_deg   = float(raw_angle)
+        msg.world_angle_deg = float(world_angle)
+        msg.blue_px         = int(blue_px)
+        msg.petal_px        = int(petal_px)
+        self.pub_floor.publish(msg)
+        
+        self.get_logger().info(f"[CV] EMIT | colour={colour} dir={direction} conf={confidence:.2f} tile#{self.tile_count} world_angle={world_angle:.1f}°")
+        
+        self.vote_buffer.clear()
+        self.vote_start_time = None
+
+    def _mask_inner_logo(self, mask, blue_contour, inner_fraction: float = 0.45):
+        out = mask.copy()
+        x, y, bw, bh = cv2.boundingRect(blue_contour)
+        cx = x + bw // 2
+        cy = y + bh // 2
+        radius = int(min(bw, bh) * inner_fraction / 2)
+        if radius > 5:
+            cv2.circle(out, (cx, cy), radius, 0, thickness=-1)
+        return out
+
+    def _filter_elongated(self, contours, min_ar: float = 1.5):
+        result = []
+        for c in contours:
+            if cv2.contourArea(c) < MIN_PETAL_AREA:
                 continue
-
-            peri   = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-
-            # Keep only rectangular (sign-like) contours
-            if len(approx) != 4:
+            _, _, cw, ch = cv2.boundingRect(c)
+            if cw == 0 or ch == 0:
                 continue
-
-            x, y, w, h = cv2.boundingRect(approx)
-
-            # Draw every valid contour in green on the viz frame
-            if viz_frame is not None:
-                cv2.drawContours(viz_frame, [approx], -1, CLR_CONTOUR, 2)
-
-            roi = gray[y:y + h, x:x + w]
-            if roi.size == 0:
-                continue
-
-            roi = cv2.resize(roi, (64, 64))
-            roi = cv2.createCLAHE(clipLimit=2.0).apply(roi)
-
-            for name, tpl in self.templates.items():
-                res   = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
-                _, score, _, _ = cv2.minMaxLoc(res)
-                if score > best_score:
-                    best_score = score
-                    best_sign  = name
-                    best_w     = float(w)
-                    best_cx    = float(x + w / 2)
-                    best_cy    = float(y + h / 2)
-                    best_box   = (x, y, w, h)
-
-        # Consensus filter
-        current_det = best_sign if best_score > MATCH_THRESHOLD else 'NONE'
-        self.detection_history.append(current_det)
-        if len(self.detection_history) > self.CONSENSUS_FRAMES:
-            self.detection_history.pop(0)
-        final_sign = (
-            self.detection_history[0]
-            if len(set(self.detection_history)) == 1
-            else 'NONE')
-
-        # ── Visualisation ─────────────────────────────────────────────────────
-        if self.enable_viz and viz_frame is not None:
-
-            # Red bounding box + label on the best matched sign
-            if best_box is not None and best_score > MATCH_THRESHOLD:
-                bx, by, bw, bh = best_box
-                cv2.rectangle(viz_frame,
-                              (bx, by), (bx + bw, by + bh),
-                              CLR_BEST, 2)
-                label = f'{best_sign}  {best_score:.2f}'
-                cv2.putText(viz_frame, label,
-                            (bx, max(by - 8, 14)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.60, CLR_LABEL, 2)
-
-            # Consensus status bar at top of frame
-            status_col = (0, 220, 0) if final_sign != 'NONE' else (120, 120, 120)
-            cv2.putText(viz_frame, f'SIGN: {final_sign}',
-                        (10, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_col, 2)
-
-            try:
-                cv2.imshow('Camera + Detection', viz_frame)
-                cv2.imshow('Mask / Threshold',   thresh)
-                cv2.waitKey(1)   # non-blocking — does not stall ROS spin
-            except Exception as exc:
-                self.get_logger().warn(f'imshow error: {exc} — disabling viz')
-                self.enable_viz = False
-
-        # ── Publish ───────────────────────────────────────────────────────────
-        out = SignDetection()
-        out.header            = msg.header
-        out.sign_type         = final_sign
-        out.confidence        = float(best_score)
-        out.distance_estimate = (
-            (FOCAL_LENGTH_PX * SIGN_PHYSICAL_WIDTH_M) / best_w
-            if best_w > 0 else 0.0)
-        out.image_x = best_cx
-        out.image_y = best_cy
-        self.pub.publish(out)
-
+            ar = max(cw, ch) / min(cw, ch)
+            if ar >= min_ar:
+                result.append(c)
+        return result
 
 def main(args=None):
     rclpy.init(args=args)
     node = SignDetectorNode()
     try:
         rclpy.spin(node)
+    except SystemExit:
+        node.get_logger().info('SystemExit raised. Graceful Stop.')
     except KeyboardInterrupt:
         pass
     finally:
-        cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

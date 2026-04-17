@@ -8,7 +8,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import Twist, Pose2D
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from mahe_nav_interfaces.msg import ArucoDetection, SignDetection, LidarAnalysis
+from mahe_nav_interfaces.msg import ArucoDetection, LidarAnalysis, FloorMarkerDetection
 
 
 # --- FIXED: [BUG 2] ---
@@ -92,8 +92,16 @@ class NavControllerNode(Node):
         best_effort  = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(Odometry,       '/odom_fused',       self._odom_cb,  10)
         self.create_subscription(LidarAnalysis,  '/lidar/analysis',   self._lidar_cb, best_effort)
-        self.create_subscription(SignDetection,  '/sign_detection',   self._sign_cb,  best_effort)
+        # self.create_subscription(SignDetection,  '/sign_detection',   self._sign_cb,  best_effort)
         self.create_subscription(ArucoDetection, '/aruco/detections', self._aruco_cb, best_effort)
+
+        # === CV INTEGRATION: REPLACE OLD SIGN SUBSCRIBER ===
+        self.latest_floor_marker = None
+        self.create_subscription(
+            FloorMarkerDetection,
+            '/floor_marker/detection',
+            self._floor_marker_cb,
+            best_effort)
         
         # === PORTED: ARUCO POSE CORRECTION ===
         self.create_subscription(Pose2D, '/aruco/pose_correction', self._pose_correction_cb, 10)
@@ -120,7 +128,8 @@ class NavControllerNode(Node):
     def _lidar_cb(self, msg):
         self.lidar = msg
 
-    def _sign_cb(self, msg):
+    # DEPRECATED — old SignDetection topic, no longer used
+    def _sign_cb_DEPRECATED(self, msg):
         self.latest_sign = msg
         sign_type = msg.sign_type.upper() if msg.sign_type else "NONE"
 
@@ -129,6 +138,18 @@ class NavControllerNode(Node):
             if self.state != State.HALT:
                 self.get_logger().info("━━━ [STATUS] MASSIVE RED TILE DETECTED ━━━")
                 self._transition(State.HALT)
+
+    # === CV INTEGRATION: REPLACE OLD SIGN SUBSCRIBER ===
+    def _floor_marker_cb(self, msg: FloorMarkerDetection):
+        # Red tile HALT — highest priority, handle immediately
+        if msg.colour == "RED" and msg.direction == "HALT":
+            if self.state != State.HALT:
+                self.get_logger().info("━━━ [CV] RED TILE DETECTED — HALTING ━━━")
+                self._transition(State.HALT)
+            return
+        # Store normal CV directions
+        if msg.confidence > 0.0 and msg.direction != "TIMEOUT":
+            self.latest_floor_marker = msg
 
     def _aruco_cb(self, msg: ArucoDetection):
         self.latest_aruco = msg
@@ -350,6 +371,24 @@ class NavControllerNode(Node):
             self._transition(State.EXPLORE)
             return
 
+        # === CV INTEGRATION: USE CV DIRECTION IN _handle_follow_green() ===
+        # Try CV direction first
+        if self.latest_floor_marker and self.latest_floor_marker.colour == "GREEN":
+            direction = self.latest_floor_marker.direction
+            self.latest_floor_marker = None   # consume it
+            self.get_logger().info(f'[FOLLOW_GREEN] CV direction: {direction}')
+            if direction == "FORWARD":
+                self._publish_vel(V_MIN, 0.0)
+            elif direction == "LEFT":
+                self._publish_vel(0.0, +W_SIGN_TURN)
+            elif direction == "RIGHT":
+                self._publish_vel(0.0, -W_SIGN_TURN)
+            elif direction == "BACKWARD":
+                self.uturn_post_state = State.FOLLOW_GREEN
+                self._transition(State.UTURN)
+            return
+
+        # Fallback: LiDAR gap nav if no CV signal yet
         if not self.lidar:
             return
         target_angle, _ = self._select_best_gap()
@@ -375,6 +414,24 @@ class NavControllerNode(Node):
             self._transition(State.EXPLORE)
             return
 
+        # === CV INTEGRATION: USE CV DIRECTION IN _handle_follow_orange() ===
+        # Try CV direction first
+        if self.latest_floor_marker and self.latest_floor_marker.colour == "ORANGE":
+            direction = self.latest_floor_marker.direction
+            self.latest_floor_marker = None   # consume it
+            self.get_logger().info(f'[FOLLOW_ORANGE] CV direction: {direction}')
+            if direction == "FORWARD":
+                self._publish_vel(V_MIN, 0.0)
+            elif direction == "LEFT":
+                self._publish_vel(0.0, +W_SIGN_TURN)
+            elif direction == "RIGHT":
+                self._publish_vel(0.0, -W_SIGN_TURN)
+            elif direction == "BACKWARD":
+                self.uturn_post_state = State.FOLLOW_ORANGE
+                self._transition(State.UTURN)
+            return
+
+        # Fallback: LiDAR gap nav if no CV signal yet
         if not self.lidar:
             return
         target_angle, _ = self._select_best_gap()

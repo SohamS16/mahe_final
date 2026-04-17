@@ -1,0 +1,13 @@
+std_msgs/Header header
+string colour
+string direction
+float32 confidence
+int32 tile_count
+float32 petal_cx
+float32 petal_cy
+float32 logo_cx
+float32 logo_cy
+float32 raw_angle_deg
+float32 world_angle_deg
+int32 blue_px
+int32 petal_px
