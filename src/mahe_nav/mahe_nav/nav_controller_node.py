@@ -7,7 +7,11 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 from mahe_nav_interfaces.msg import ArucoDetection, SignDetection, LidarAnalysis
+
+# --- FIXED: [BUG 2] ---
+ACTION_DISTANCE_THRESHOLD = 0.8
 
 
 class State(Enum):
@@ -96,9 +100,11 @@ class NavControllerNode(Node):
         self.sign      = None
         self.aruco_seen = set()
 
-        self.expected_sequence = [2, 1, 3, 4, 5]
-        self.current_sequence_index = 0
-        self.execution_distance_m = 1.0
+        # --- FIXED: [BUG 3] ---
+        self.expected_marker_index = 0
+        self.marker_sequence = [2, 1, 3, 4, 5]
+        
+        self.latest_scan = None # For BUG 4
 
         self.PASSABLE_THR = 0.525
 
@@ -128,6 +134,8 @@ class NavControllerNode(Node):
         self.create_subscription(LidarAnalysis,  '/lidar/analysis',   self._lidar_cb, best_effort)
         self.create_subscription(SignDetection,  '/sign_detection',   self._sign_cb,  best_effort)
         self.create_subscription(ArucoDetection, '/aruco/detections', self._aruco_cb, best_effort)
+        # --- FIXED: [BUG 4] ---
+        self.create_subscription(LaserScan,      '/scan',             self._scan_cb,  best_effort)
 
         self.create_timer(0.05, self._control_loop)
         self.get_logger().info('NavController: Sign-Aware Differential-Drive Version Active')
@@ -141,6 +149,10 @@ class NavControllerNode(Node):
         self.pose_yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _scan_cb(self, msg):
+        # --- FIXED: [BUG 4] ---
+        self.latest_scan = msg
 
     def _lidar_cb(self, msg):
         self.lidar = msg
@@ -176,86 +188,121 @@ class NavControllerNode(Node):
 
     def _aruco_cb(self, msg: 'ArucoDetection'):
         mid = msg.marker_id
+        
+        # --- FIXED: [BUG 1] ---
+        # Explicitly filter out ID 0 and any ID above 5
+        if mid < 1 or mid > 5:
+            self.get_logger().debug(f"BUG 1 FILTER: Ignoring ArUco ID {mid}")
+            return
+
         self.aruco_seen.add(mid)
+        d  = float(msg.distance)
 
         ARUCO_POSE_OVERRIDE = True  # ← comment for observe-only mode
 
-        if mid in MARKER_WORLD_POS and msg.distance > 0.05:
-            mx, my = MARKER_WORLD_POS[mid]
-            d  = float(msg.distance)
-            β  = float(msg.bearing_angle_rad)
-            θ  = self.pose_yaw
-            world_angle = θ + β
-            corrected_x = mx - d * math.cos(world_angle)
-            corrected_y = my - d * math.sin(world_angle)
-            drift = math.hypot(corrected_x - self.pose_x, corrected_y - self.pose_y)
+        if mid in MARKER_WORLD_POS and d > 0.05:
+            # --- FIXED: [BUG 2] ---
+            # Restricted EKF override distance
+            if d <= ACTION_DISTANCE_THRESHOLD:
+                mx, my = MARKER_WORLD_POS[mid]
+                β  = float(msg.bearing_angle_rad)
+                θ  = self.pose_yaw
+                world_angle = θ + β
+                corrected_x = mx - d * math.cos(world_angle)
+                corrected_y = my - d * math.sin(world_angle)
+                drift = math.hypot(corrected_x - self.pose_x, corrected_y - self.pose_y)
 
-            if 'ARUCO_POSE_OVERRIDE' in dir() and ARUCO_POSE_OVERRIDE:
-                self.pose_x = corrected_x
-                self.pose_y = corrected_y
-                mode_tag = 'OVERRIDE APPLIED'
+                if 'ARUCO_POSE_OVERRIDE' in dir() and ARUCO_POSE_OVERRIDE:
+                    self.pose_x = corrected_x
+                    self.pose_y = corrected_y
+                    mode_tag = 'OVERRIDE APPLIED'
+                else:
+                    mode_tag = 'OBSERVE ONLY'
+
+                self.get_logger().info(
+                    f'[ARUCO {mid}] {mode_tag} | '
+                    f'EKF=({self.pose_x:.3f},{self.pose_y:.3f}) | '
+                    f'ArUco=({corrected_x:.3f},{corrected_y:.3f}) | '
+                    f'Drift={drift:.3f}m dist={d:.2f}m bear={math.degrees(β):.1f}°')
             else:
-                mode_tag = 'OBSERVE ONLY'
+                # --- FIXED: [BUG 2] ---
+                self.get_logger().info(f"[ARUCO {mid}] Approaching... dist={d:.2f}m")
+                return
 
-            self.get_logger().info(
-                f'[ARUCO {mid}] {mode_tag} | '
-                f'EKF=({self.pose_x:.3f},{self.pose_y:.3f}) | '
-                f'ArUco=({corrected_x:.3f},{corrected_y:.3f}) | '
-                f'Drift={drift:.3f}m dist={d:.2f}m bear={math.degrees(β):.1f}°')
-
-        # Tag 0 Bypass: Maze Navigation Override
-        if mid == 0 and msg.first_detection:
-            self.get_logger().info("ACTION: Tag 0 -> Enter Maze Navigation")
-            self._transition(State.MAZE_NAVIGATE)
+        # --- FIXED: [BUG 3] ---
+        # Sequence Tracking enforcement
+        if self.expected_marker_index >= len(self.marker_sequence):
             return
 
-        # Sequence Tracking
-        if self.current_sequence_index >= len(self.expected_sequence):
-            return
-
-        expected_id = self.expected_sequence[self.current_sequence_index]
+        expected_id = self.marker_sequence[self.expected_marker_index]
         if mid != expected_id:
-            # Ignore false positives or out-of-order markers
             return
             
         self.execute_marker_command(mid, d)
 
+    def check_lidar_clearance(self, direction, scan_msg):
+        # --- FIXED: [BUG 4] ---
+        if scan_msg is None:
+            return False
+        ranges = scan_msg.ranges
+        n = len(ranges)
+        if direction == 'LEFT':
+            cone = ranges[int(n*0.1):int(n*0.4)]
+        elif direction == 'RIGHT':
+            cone = ranges[int(n*0.6):int(n*0.9)]
+        elif direction == 'U_TURN':
+            cone = ranges[int(n*0.4):int(n*0.6)]
+        else:
+            return False
+        return min(cone) > 0.45
+
     def execute_marker_command(self, marker_id: int, marker_distance: float):
         """Routes sequence-validated ArUco marker ID based on distance constraint."""
-        if marker_distance > self.execution_distance_m:
-            self.get_logger().debug(f"APPROACHING: Target {marker_id} detected at {marker_distance:.2f}m. Moving closer...")
+        # Note: distance is already checked in _aruco_cb but reinforced here
+        if marker_distance > ACTION_DISTANCE_THRESHOLD:
             return
 
         action_executed = False
         match marker_id:
             case 1:
-                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} at {marker_distance:.2f}m -> Take Left")
-                action_executed = self._queue_sign_action("LEFT")
+                # --- FIXED: [BUG 4] ---
+                if self.check_lidar_clearance('LEFT', self.latest_scan):
+                    self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Take Left")
+                    action_executed = self._queue_sign_action("LEFT")
+                else:
+                    self.get_logger().warn("LIDAR REJECTION: LEFT turn blocked!")
             case 2:
-                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} at {marker_distance:.2f}m -> Take Right")
-                action_executed = self._queue_sign_action("RIGHT")
+                # --- FIXED: [BUG 4] ---
+                if self.check_lidar_clearance('RIGHT', self.latest_scan):
+                    self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Take Right")
+                    action_executed = self._queue_sign_action("RIGHT")
+                else:
+                    self.get_logger().warn("LIDAR REJECTION: RIGHT turn blocked!")
             case 3:
-                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} at {marker_distance:.2f}m -> Follow Green")
+                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Follow Green")
                 self._transition(State.FOLLOW_GREEN)
                 action_executed = True
             case 4:
-                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} at {marker_distance:.2f}m -> Take U-turn")
-                action_executed = self._queue_sign_action("INPLACE_ROTATION")
+                # --- FIXED: [BUG 4] ---
+                if self.check_lidar_clearance('U_TURN', self.latest_scan):
+                    self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Take U-turn")
+                    action_executed = self._queue_sign_action("INPLACE_ROTATION")
+                else:
+                    self.get_logger().warn("LIDAR REJECTION: U_TURN blocked!")
             case 5:
-                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} at {marker_distance:.2f}m -> Follow Orange")
+                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Follow Orange")
                 self._transition(State.FOLLOW_ORANGE)
                 action_executed = True
             case _:
-                self.get_logger().error(f"CORRUPTION: ID {marker_id} validated but lacks implementation.")
                 return
 
         # Advance sequence upon successful queueing/transition
         if action_executed:
-            self.current_sequence_index += 1
-            if self.current_sequence_index < len(self.expected_sequence):
-                self.get_logger().info(f"SEQUENCE ADVANCED: Now looking for ArUco ID {self.expected_sequence[self.current_sequence_index]}")
+            self.expected_marker_index += 1
+            if self.expected_marker_index < len(self.marker_sequence):
+                self.get_logger().info(f"SEQUENCE ADVANCED: Next ArUco ID {self.marker_sequence[self.expected_marker_index]}")
             else:
-                self.get_logger().info("SEQUENCE COMPLETE: Final marker has been scheduled/executed.")
+                self.get_logger().info("SEQUENCE COMPLETE")
 
     # ── Sign Action ──────────────────────────────────────────────────────────
 
