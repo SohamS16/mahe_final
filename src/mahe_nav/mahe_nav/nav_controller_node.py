@@ -245,20 +245,33 @@ class NavControllerNode(Node):
             self.execute_marker_command(mid)
 
     def check_lidar_clearance(self, direction, scan_msg):
-        # --- FIXED: [BUG 4] ---
+        # --- FIXED: LIDAR TOLERANCE ---
         if scan_msg is None:
             return False
         ranges = scan_msg.ranges
         n = len(ranges)
+        
         if direction == 'LEFT':
-            cone = ranges[int(n*0.1):int(n*0.4)]
+            cone = ranges[int(n*0.125):int(n*0.375)]
         elif direction == 'RIGHT':
-            cone = ranges[int(n*0.6):int(n*0.9)]
+            cone = ranges[int(n*0.625):int(n*0.875)]
         elif direction == 'U_TURN':
-            cone = ranges[int(n*0.4):int(n*0.6)]
+            cone = ranges[int(n*0.375):int(n*0.625)]
         else:
             return False
-        return min(cone) > 0.45
+            
+        clean_cone = [r for r in cone if not math.isinf(r) and not math.isnan(r)]
+        if not clean_cone:
+            return False
+            
+        max_range = max(clean_cone)
+        threshold = 0.3
+        is_clear = max_range > threshold
+        
+        result_str = "CLEAR" if is_clear else "BLOCKED"
+        self.get_logger().info(f"[LIDAR CHECK] Direction: {direction} | Max range in arc: {max_range:.2f}m | Threshold: {threshold}m | Result: {result_str}")
+        
+        return is_clear
 
     def execute_marker_command(self, marker_id: int):
         """Routes ArUco marker ID."""
