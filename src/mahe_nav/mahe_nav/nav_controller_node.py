@@ -100,9 +100,9 @@ class NavControllerNode(Node):
         self.sign      = None
         self.aruco_seen = set()
 
-        # --- FIXED: [BUG 3] ---
+        # --- FIXED: STEP 2 - DETECTION ORDER / SEQUENCE TRACKER ---
         self.expected_marker_index = 0
-        self.marker_sequence = [2, 1, 3, 4, 5]
+        self.marker_sequence = [1, 0, 2, 3, 4]
         
         self.latest_scan = None # For BUG 4
 
@@ -189,56 +189,71 @@ class NavControllerNode(Node):
     def _aruco_cb(self, msg: 'ArucoDetection'):
         mid = msg.marker_id
         
-        # --- FIXED: [BUG 1] ---
-        # Explicitly filter out ID 0 and any ID above 5
-        if mid < 1 or mid > 5:
-            self.get_logger().debug(f"BUG 1 FILTER: Ignoring ArUco ID {mid}")
+        # --- FIXED: STEP 1 - REMAP ARUCO IDs (IDs ARE NOW 0 TO 4) ---
+        if mid > 4:
             return
 
         self.aruco_seen.add(mid)
         d  = float(msg.distance)
+        β  = float(msg.bearing_angle_rad)
 
         ARUCO_POSE_OVERRIDE = True  # ← comment for observe-only mode
 
         if mid in MARKER_WORLD_POS and d > 0.05:
-            # --- FIXED: [BUG 2] ---
-            # Restricted EKF override distance
             if d <= ACTION_DISTANCE_THRESHOLD:
                 mx, my = MARKER_WORLD_POS[mid]
-                β  = float(msg.bearing_angle_rad)
                 θ  = self.pose_yaw
                 world_angle = θ + β
                 corrected_x = mx - d * math.cos(world_angle)
                 corrected_y = my - d * math.sin(world_angle)
-                drift = math.hypot(corrected_x - self.pose_x, corrected_y - self.pose_y)
-
+                
                 if 'ARUCO_POSE_OVERRIDE' in dir() and ARUCO_POSE_OVERRIDE:
                     self.pose_x = corrected_x
                     self.pose_y = corrected_y
-                    mode_tag = 'OVERRIDE APPLIED'
-                else:
-                    mode_tag = 'OBSERVE ONLY'
 
-                self.get_logger().info(
-                    f'[ARUCO {mid}] {mode_tag} | '
-                    f'EKF=({self.pose_x:.3f},{self.pose_y:.3f}) | '
-                    f'ArUco=({corrected_x:.3f},{corrected_y:.3f}) | '
-                    f'Drift={drift:.3f}m dist={d:.2f}m bear={math.degrees(β):.1f}°')
+        cmd_map = {
+            0: "Take left",
+            1: "Take right",
+            2: "Start following green",
+            3: "Take U-turn",
+            4: "Start following orange"
+        }
+        cmd_name = cmd_map.get(mid, "Unknown")
+        status_str = "Unknown"
+
+        # --- FIXED: STEP 2 - DETECTION ORDER / SEQUENCE TRACKER ---
+        is_expected = False
+        if self.expected_marker_index < len(self.marker_sequence):
+            if mid == self.marker_sequence[self.expected_marker_index]:
+                is_expected = True
+
+        if not is_expected:
+            status_str = "Ignored - Not in sequence"
+            self.get_logger().info(f"[ARUCO {mid}] Detected but not expected yet. Ignoring.")
+        else:
+            # --- FIXED: STEP 3 - DISTANCE GATE ---
+            if d > ACTION_DISTANCE_THRESHOLD:
+                status_str = "Approaching"
+                self.get_logger().info(f"[ARUCO {mid}] Detected at {d:.2f}m - Too far, approaching...")
             else:
-                # --- FIXED: [BUG 2] ---
-                self.get_logger().info(f"[ARUCO {mid}] Approaching... dist={d:.2f}m")
-                return
+                status_str = "Executing"
+                self.get_logger().info(f"[ARUCO {mid}] In range at {d:.2f}m - Executing: {cmd_name}")
 
-        # --- FIXED: [BUG 3] ---
-        # Sequence Tracking enforcement
-        if self.expected_marker_index >= len(self.marker_sequence):
-            return
+        # --- FIXED: STEP 4 - VERBOSE PRINT ON DETECTION ---
+        verbose_msg = (
+            f"\n----------------------------------\n"
+            f"ARUCO DETECTED\n"
+            f"  ID       : {mid}\n"
+            f"  Command  : {cmd_name}\n"
+            f"  Distance : {d:.2f}m\n"
+            f"  Bearing  : {math.degrees(β):.1f}°\n"
+            f"  Status   : {status_str}\n"
+            f"----------------------------------"
+        )
+        self.get_logger().info(verbose_msg)
 
-        expected_id = self.marker_sequence[self.expected_marker_index]
-        if mid != expected_id:
-            return
-            
-        self.execute_marker_command(mid, d)
+        if status_str == "Executing":
+            self.execute_marker_command(mid)
 
     def check_lidar_clearance(self, direction, scan_msg):
         # --- FIXED: [BUG 4] ---
@@ -256,45 +271,34 @@ class NavControllerNode(Node):
             return False
         return min(cone) > 0.45
 
-    def execute_marker_command(self, marker_id: int, marker_distance: float):
-        """Routes sequence-validated ArUco marker ID based on distance constraint."""
-        # Note: distance is already checked in _aruco_cb but reinforced here
-        if marker_distance > ACTION_DISTANCE_THRESHOLD:
-            return
-
+    def execute_marker_command(self, marker_id: int):
+        """Routes sequence-validated ArUco marker ID."""
         action_executed = False
         match marker_id:
-            case 1:
-                # --- FIXED: [BUG 4] ---
+            case 0:
+                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
                 if self.check_lidar_clearance('LEFT', self.latest_scan):
-                    self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Take Left")
                     action_executed = self._queue_sign_action("LEFT")
                 else:
-                    self.get_logger().warn("LIDAR REJECTION: LEFT turn blocked!")
-            case 2:
-                # --- FIXED: [BUG 4] ---
+                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on LEFT. Holding position.")
+            case 1:
+                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
                 if self.check_lidar_clearance('RIGHT', self.latest_scan):
-                    self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Take Right")
                     action_executed = self._queue_sign_action("RIGHT")
                 else:
-                    self.get_logger().warn("LIDAR REJECTION: RIGHT turn blocked!")
-            case 3:
-                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Follow Green")
+                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on RIGHT. Holding position.")
+            case 2:
                 self._transition(State.FOLLOW_GREEN)
                 action_executed = True
-            case 4:
-                # --- FIXED: [BUG 4] ---
+            case 3:
+                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
                 if self.check_lidar_clearance('U_TURN', self.latest_scan):
-                    self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Take U-turn")
                     action_executed = self._queue_sign_action("INPLACE_ROTATION")
                 else:
-                    self.get_logger().warn("LIDAR REJECTION: U_TURN blocked!")
-            case 5:
-                self.get_logger().info(f"VALID TRIGGER: Marker {marker_id} -> Follow Orange")
+                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on U_TURN. Holding position.")
+            case 4:
                 self._transition(State.FOLLOW_ORANGE)
                 action_executed = True
-            case _:
-                return
 
         # Advance sequence upon successful queueing/transition
         if action_executed:
