@@ -112,6 +112,12 @@ class NavControllerNode(Node):
         self.u_turn_entry_yaw     = 0.0
         self.stuck_recovery_until = 0.0
 
+        # --- FIXED: EXECUTION LOCK ---
+        self.executing_command = False
+        self.execution_cooldown = 3.0
+        self.last_execution_time = 0.0
+        self.executing_marker_id = -1
+
         # ── Sign execution state ─────────────────────────────────────────────
         self.sign_turn_type       = "NONE"
         self.sign_turn_w          = 0.0      # angular.z to command during pivot
@@ -186,6 +192,17 @@ class NavControllerNode(Node):
 
     def _aruco_cb(self, msg: 'ArucoDetection'):
         mid = msg.marker_id
+        
+        # --- FIXED: EXECUTION LOCK ---
+        now = time.time()
+        if self.executing_command:
+            if now - self.last_execution_time > self.execution_cooldown:
+                self.executing_command = False
+                self.get_logger().info("[ARUCO LOCK] Command complete. Ready for next marker.")
+            else:
+                if mid <= 4:
+                    self.get_logger().info(f"[ARUCO LOCK] Ignoring ARUCO {mid} - ArUco {self.executing_marker_id} command still executing.")
+                return
         
         # --- FIXED: STEP 1 - REMAP ARUCO IDs (IDs ARE NOW 0 TO 4) ---
         if mid > 4:
@@ -303,6 +320,12 @@ class NavControllerNode(Node):
             case 4:
                 self._transition(State.FOLLOW_ORANGE)
                 action_executed = True
+
+        if action_executed:
+            # --- FIXED: EXECUTION LOCK ---
+            self.executing_command = True
+            self.last_execution_time = time.time()
+            self.executing_marker_id = marker_id
 
         # --- FIXED: STEP 2 - REMOVE ALL SEQUENCE/PRECEDENCE LOGIC ---
         # Removed as requested.
@@ -455,6 +478,10 @@ class NavControllerNode(Node):
             self.sign_turn_type    = "NONE"
             self.sign_turn_started = False
             self.sign_cooldown_until = time.time() + SIGN_COOLDOWN_SEC
+            
+            # --- FIXED: EXECUTION LOCK ---
+            self.executing_command = False
+            self.get_logger().info("[ARUCO LOCK] Command complete. Ready for next marker.")
 
             if self.lidar and self.lidar.forward_dist > CLEAR_PATH_THRESH:
                 self._transition(State.EXPLORE_FORWARD)
