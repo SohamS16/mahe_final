@@ -29,7 +29,6 @@ class State(Enum):
     APPROACH_TAG  = auto()
     TAG_ACTION    = auto()
     FOLLOW_GREEN  = auto()
-    FOLLOW_BLUE   = auto()
     FOLLOW_ORANGE = auto()
     UTURN         = auto()
     RECOVERY      = auto()
@@ -165,7 +164,6 @@ class NavControllerNode(Node):
             case State.APPROACH_TAG:  self._handle_approach_tag()
             case State.TAG_ACTION:    self._handle_tag_action()
             case State.FOLLOW_GREEN:  self._handle_follow_green()
-            case State.FOLLOW_BLUE:   self._handle_follow_blue()
             case State.FOLLOW_ORANGE: self._handle_follow_orange()
             case State.UTURN:         self._handle_uturn()
             case State.RECOVERY:      self._handle_recovery()
@@ -305,7 +303,7 @@ class NavControllerNode(Node):
         elif mid == 2:
             self._transition(State.FOLLOW_GREEN)
         elif mid == 3:
-            self.uturn_post_state = State.FOLLOW_BLUE
+            self.uturn_post_state = State.EXPLORE
             self._transition(State.UTURN)
         elif mid == 4:
             self._transition(State.FOLLOW_ORANGE)
@@ -349,31 +347,6 @@ class NavControllerNode(Node):
         # This avoids firing the EXPLORE stuck watchdog while in a FOLLOW state
         if elapsed > 120.0:
             self.get_logger().warn("FOLLOW_GREEN timeout! Falling back to EXPLORE.")
-            self._transition(State.EXPLORE)
-            return
-
-        if not self.lidar:
-            return
-        target_angle, _ = self._select_best_gap()
-        if target_angle is not None:
-            self._move(V_MIN, target_angle)
-        else:
-            self._publish_vel(V_MIN, W_SCAN)
-
-    def _handle_follow_blue(self):
-        elapsed = time.time() - self.state_start_time
-
-        # Check for next ArUco tag
-        if (self.latest_aruco and
-                float(self.latest_aruco.distance) <= ACTION_DISTANCE_THRESHOLD and
-                self.latest_aruco.marker_id not in self.logged_tags):
-            self._publish_vel(0.0, 0.0)
-            self._transition(State.APPROACH_TAG)
-            return
-
-        # [FIX 1] FOLLOW states use gap navigation directly, NOT _handle_explore()
-        if elapsed > 120.0:
-            self.get_logger().warn("FOLLOW_BLUE timeout! Falling back to EXPLORE.")
             self._transition(State.EXPLORE)
             return
 
