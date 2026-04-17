@@ -100,7 +100,7 @@ class NavControllerNode(Node):
         self.sign      = None
         self.aruco_seen = set()
 
-        # --- FIXED: STEP 1 - REMOVE SEQUENCE TRACKING ENTIRELY ---
+        # --- FIXED: STEP 2 - REMOVE ALL SEQUENCE/PRECEDENCE LOGIC ---
         
         self.latest_scan = None # For BUG 4
 
@@ -210,8 +210,9 @@ class NavControllerNode(Node):
                     self.pose_y = corrected_y
 
         cmd_map = {
-            0: "Take left",
-            1: "Take right",
+            # --- FIXED: STEP 1 - FIX ID TO COMMAND MAPPING ---
+            0: "Take right",
+            1: "Take left",
             2: "Start following green",
             3: "Take U-turn",
             4: "Start following orange"
@@ -219,7 +220,7 @@ class NavControllerNode(Node):
         cmd_name = cmd_map.get(mid, "Unknown")
         status_str = "Unknown"
 
-        # --- FIXED: STEP 2 - SIMPLE EXECUTION LOGIC ---
+        # --- FIXED: STEP 3 - EXECUTION LOGIC (simple, no precedence) ---
         if d > ACTION_DISTANCE_THRESHOLD:
             status_str = "Approaching"
             self.get_logger().info(f"[ARUCO {mid}] Detected at {d:.2f}m - Too far, approaching...")
@@ -260,21 +261,23 @@ class NavControllerNode(Node):
         return min(cone) > 0.45
 
     def execute_marker_command(self, marker_id: int):
-        """Routes sequence-validated ArUco marker ID."""
+        """Routes ArUco marker ID."""
         action_executed = False
         match marker_id:
             case 0:
-                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
-                if self.check_lidar_clearance('LEFT', self.latest_scan):
-                    action_executed = self._queue_sign_action("LEFT")
-                else:
-                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on LEFT. Holding position.")
-            case 1:
+                # --- FIXED: STEP 1 - FIX ID TO COMMAND MAPPING ---
                 # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
                 if self.check_lidar_clearance('RIGHT', self.latest_scan):
                     action_executed = self._queue_sign_action("RIGHT")
                 else:
                     self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on RIGHT. Holding position.")
+            case 1:
+                # --- FIXED: STEP 1 - FIX ID TO COMMAND MAPPING ---
+                # --- FIXED: STEP 5 - LIDAR SAFETY CHECK ---
+                if self.check_lidar_clearance('LEFT', self.latest_scan):
+                    action_executed = self._queue_sign_action("LEFT")
+                else:
+                    self.get_logger().warn(f"[ARUCO {marker_id}] LIDAR BLOCKED on LEFT. Holding position.")
             case 2:
                 self._transition(State.FOLLOW_GREEN)
                 action_executed = True
@@ -288,8 +291,8 @@ class NavControllerNode(Node):
                 self._transition(State.FOLLOW_ORANGE)
                 action_executed = True
 
-        # --- FIXED: STEP 1 - REMOVE SEQUENCE TRACKING ENTIRELY ---
-        # Sequence tracking removed as requested.
+        # --- FIXED: STEP 2 - REMOVE ALL SEQUENCE/PRECEDENCE LOGIC ---
+        # Removed as requested.
 
     # ── Sign Action ──────────────────────────────────────────────────────────
 
